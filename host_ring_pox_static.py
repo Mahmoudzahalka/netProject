@@ -8,6 +8,8 @@ Works directly from FatTree parameters (k).
 
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
+from pox.lib.addresses import EthAddr
+
 
 log = core.getLogger()
 
@@ -95,7 +97,8 @@ class HostRingStatic(object):
 
             # Send traffic from H_src to the port of H_dst
             msg = of.ofp_flow_mod()
-            msg.match.dl_src = mac_src
+            #msg.match.dl_src = mac_src   #replaced to avoid POX bug
+            msg.match.dl_src = EthAddr(mac_src)
             msg.actions.append(of.ofp_action_output(port=h_dst["port"]))
             event.connection.send(msg)
 

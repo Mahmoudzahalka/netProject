@@ -51,11 +51,11 @@ class FatTreeTopo(Topo):
 
         pods = [self.make_pod(i) for i in range(k)]
 
-        for core_num in range((k/2)**2):
+        for core_num in range((k//2)**2):
             dpid = location_to_dpid(core=core_num)
             s = self.addSwitch('c_s%d'%core_num, dpid=dpid)
 
-            stride_num = core_num // (k/2)
+            stride_num = core_num // (k//2)
             for i in range(k):
                 self.addLink(s, pods[i][stride_num])
 
@@ -64,11 +64,11 @@ class FatTreeTopo(Topo):
     def make_pod(self, pod_num):
         lower_layer_switches = [
             self.addSwitch('p%d_s%d'%(pod_num, i), dpid=location_to_dpid(pod=pod_num, switch=i))
-            for i in range(self.k / 2)
+            for i in range(self.k // 2)
         ]
 
         for i, switch in enumerate(lower_layer_switches):
-            for j in range(2, self.k / 2 + 2):
+            for j in range(2, self.k // 2 + 2):
                 h = self.addHost('p%d_s%d_h%d'%(pod_num, i, j),
                     ip='10.%d.%d.%d'%(pod_num, i, j),
                     mac=location_to_mac(pod_num, i, j))
@@ -76,7 +76,7 @@ class FatTreeTopo(Topo):
         
         upper_layer_switches = [
             self.addSwitch('p%d_s%d'%(pod_num, i), dpid=location_to_dpid(pod=pod_num, switch=i))
-            for i in range(self.k / 2, self.k)
+            for i in range(self.k // 2, self.k)
         ]
 
         for lower in lower_layer_switches:
