@@ -39,8 +39,8 @@ def onepacket_ring_allreduce(net):
             dst = hosts[(i + 1) % N]
             dst_ip = dst.IP()
 
-            # Send exactly one UDP packet
-            cmd = f"iperf -c {dst_ip}  -b 1M -l 1400 -t 0.05 &" #removed -u option for UDP
+            # Send exactly one TCP packet
+            cmd = f"iperf -c {dst_ip} -b 1M -l 1400 -t 0.5 &" #here it worked with -u just wrong measurments
             src.cmd(cmd)
 
             info(f"{src.name} -> {dst.name} (gradient packet)\n")
