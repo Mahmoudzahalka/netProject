@@ -170,8 +170,9 @@ class FatTreeFRR(Topo):
         core_routers = []
         num_core = (k // 2) ** 2  # for k=4: 4 core routers
         for i in range(num_core):
-            c = self.addNode(f"c{i}", cls=FRRRouter)
+            c = self.addNode(f"c{i}", cls=FRRRouter, ip=None)
             core_routers.append(c)
+
 
         # ---------- PODS ----------
         for p in range(k):  # pod index: 0..3
@@ -181,14 +182,16 @@ class FatTreeFRR(Topo):
             # ----- Aggregation routers -----
             for a in range(k // 2, k):  # a=2,3 for k=4
                 name = f"p{p}_a{a}"
-                r = self.addNode(name, cls=FRRRouter)
+                r = self.addNode(name, cls=FRRRouter, ip=None)
                 agg_routers.append(r)
+
 
             # ----- Edge routers + hosts -----
             for e in range(k // 2):  # e=0,1 for k=4
                 er_name = f"p{p}_e{e}"
-                er = self.addNode(er_name, cls=FRRRouter)
+                er = self.addNode(er_name, cls=FRRRouter, ip=None)
                 edge_routers.append(er)
+
 
                 # 2 hosts per edge router → always two /31s
                 # host link #1 → 10.p.e.[2]/31 ↔ 10.p.e.[3]/31

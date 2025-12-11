@@ -3,10 +3,21 @@
 FRR-based L3 Fat-Tree topology for Mininet (k=4), fully routed.
 
 Design:
-- All "switches" are FRR routers (FRRRouter).
-- Every router-router and host-router link is a /31 point-to-point link.
+- All "switches" are Linux routers (FRRRouter).
+- Every router–router and host–router link is a /31 point-to-point link.
 - No L2 switching anywhere.
-- OSPF (ospfd) + zebra run in each router namespace.
+- Each router runs its own FRR instance (zebra + ospfd) in its namespace.
+- OSPF learns all routes and ECMP is used where there are equal-cost paths.
+
+IMPORTANT:
+- On the host, stop and disable the system FRR service once:
+
+    sudo systemctl stop frr
+    sudo systemctl disable frr
+
+- Make sure FRR is installed:
+
+    sudo apt-get install -y frr frr-pythontools
 """
 
 import os
@@ -17,7 +28,7 @@ from mininet.net import Mininet
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 
-# Absolute paths to FRR binaries (Ubuntu default – adjust if different on your system)
+# Paths to FRR binaries (Ubuntu/Debian default)
 FRR_ZEBRA = "/usr/lib/frr/zebra"
 FRR_OSPFD = "/usr/lib/frr/ospfd"
 
@@ -37,7 +48,6 @@ class FRRRouter(Node):
         # Per-router FRR directory
         self.frr_dir = f"/tmp/frr-{self.name}"
         os.makedirs(self.frr_dir, exist_ok=True)
-        self.cmd(f"chown -R frr:frr {self.frr_dir}")
 
         zebra_conf = f"{self.frr_dir}/zebra.conf"
         ospf_conf = f"{self.frr_dir}/ospfd.conf"
@@ -53,6 +63,8 @@ log file {self.frr_dir}/zebra.log
             f.write(zebra_cfg)
 
         # ---------------- ospfd.conf ----------------
+        # We enable OSPF on all interfaces (interface default) and
+        # advertise everything via a single area 0 statement.
         ospf_cfg = f"""
 hostname {self.name}
 password zebra
@@ -68,46 +80,52 @@ router ospf
 """
         with open(ospf_conf, "w") as f:
             f.write(ospf_cfg)
+
     def startFRR(self):
         """Start zebra + ospfd AFTER Mininet has brought interfaces up."""
 
         zebra_conf = f"{self.frr_dir}/zebra.conf"
-        ospf_conf  = f"{self.frr_dir}/ospfd.conf"
+        ospf_conf = f"{self.frr_dir}/ospfd.conf"
 
         zebra_pid = f"{self.frr_dir}/zebra.pid"
-        ospf_pid  = f"{self.frr_dir}/ospfd.pid"
+        ospf_pid = f"{self.frr_dir}/ospfd.pid"
 
         zebra_out = f"{self.frr_dir}/zebra.out"
         zebra_err = f"{self.frr_dir}/zebra.err"
-        ospf_out  = f"{self.frr_dir}/ospfd.out"
-        ospf_err  = f"{self.frr_dir}/ospfd.err"
+        ospf_out = f"{self.frr_dir}/ospfd.out"
+        ospf_err = f"{self.frr_dir}/ospfd.err"
+
+        # Per-router zserv + VTY socket
+        zserv_sock = f"{self.frr_dir}/zebra.sock"
+        vty_sock = f"{self.frr_dir}/vty.sock"
 
         info(f"*** Starting FRR on {self.name}\n")
 
-        # ---- Start zebra as user frr ----
+        # Start zebra
         self.cmd(
             f"{FRR_ZEBRA} -d "
             f"-f {zebra_conf} "
-            f"-z {self.frr_dir}/zebra.sock "
+            f"-z {zserv_sock} "
+            f"--vty_socket {vty_sock} "
             f"-i {zebra_pid} "
             f"--user frr --group frr "
             f"> {zebra_out} 2> {zebra_err} &"
         )
 
-        # ---- Start ospfd as user frr ----
+        # Start ospfd
         self.cmd(
             f"{FRR_OSPFD} -d "
             f"-f {ospf_conf} "
-            f"-z {self.frr_dir}/zebra.sock "
+            f"-z {zserv_sock} "
+            f"--vty_socket {vty_sock} "
             f"-i {ospf_pid} "
             f"--user frr --group frr "
             f"> {ospf_out} 2> {ospf_err} &"
         )
 
-
-
     def terminate(self):
         """Stop FRR daemons on node shutdown."""
+        # Kill FRR daemons in this namespace
         self.cmd("pkill ospfd || true")
         self.cmd("pkill zebra || true")
         super(FRRRouter, self).terminate()
@@ -123,13 +141,12 @@ class FatTreeFRR(Topo):
     Addressing:
 
     1) Host-router links (point-to-point, /31):
-         router: 10.P.E.2/31 , host: 10.P.E.3/31
-         router: 10.P.E.4/31 , host: 10.P.E.5/31
-
-       (Avoids 10.x.x.0/31)
+         For pod P, edge E, two hosts per edge:
+           - Host 1: router: 10.P.E.2/31 , host: 10.P.E.3/31
+           - Host 2: router: 10.P.E.4/31 , host: 10.P.E.5/31
 
     2) Router-router links (edge<->agg, agg<->core):
-       Each gets a unique /31 in 172.16.0.0/16.
+       Unique /31s carved from 172.16.0.0/16.
     """
 
     def __init__(self, k=4):
@@ -170,7 +187,8 @@ class FatTreeFRR(Topo):
         core_routers = []
         num_core = (k // 2) ** 2  # for k=4: 4 core routers
         for i in range(num_core):
-            c = self.addNode(f"c{i}", cls=FRRRouter)
+            # ip=None so Mininet does NOT auto-assign 10.0.0.X/8
+            c = self.addNode(f"c{i}", cls=FRRRouter, ip=None)
             core_routers.append(c)
 
         # ---------- PODS ----------
@@ -181,22 +199,22 @@ class FatTreeFRR(Topo):
             # ----- Aggregation routers -----
             for a in range(k // 2, k):  # a=2,3 for k=4
                 name = f"p{p}_a{a}"
-                r = self.addNode(name, cls=FRRRouter)
+                r = self.addNode(name, cls=FRRRouter, ip=None)
                 agg_routers.append(r)
 
             # ----- Edge routers + hosts -----
             for e in range(k // 2):  # e=0,1 for k=4
                 er_name = f"p{p}_e{e}"
-                er = self.addNode(er_name, cls=FRRRouter)
+                er = self.addNode(er_name, cls=FRRRouter, ip=None)
                 edge_routers.append(er)
 
-                # 2 hosts per edge router → always two /31s
+                # 2 hosts per edge router → two /31s
                 # host link #1 → 10.p.e.[2]/31 ↔ 10.p.e.[3]/31
                 # host link #2 → 10.p.e.[4]/31 ↔ 10.p.e.[5]/31
                 for h_idx in range(2):  # 0,1
                     base = 2 * (h_idx + 1)      # 2, 4
                     router_ip = f"10.{p}.{e}.{base}/31"
-                    host_ip   = f"10.{p}.{e}.{base + 1}/31"
+                    host_ip = f"10.{p}.{e}.{base + 1}/31"
 
                     router_ip_plain = router_ip.split("/")[0]
 
@@ -211,7 +229,7 @@ class FatTreeFRR(Topo):
                         er,
                         host,
                         params1={"ip": router_ip},
-                        params2={},
+                        params2={},  # host already has IP from ip=
                     )
 
             # ----- Edge ↔ Aggregation links -----
@@ -220,7 +238,7 @@ class FatTreeFRR(Topo):
                     self.addP2PLink(er, ar)
 
             # ----- Aggregation ↔ Core links -----
-            half = k // 2
+            half = k // 2  # 2 for k=4
             for a_index, ar in enumerate(agg_routers):
                 group = a_index  # 0 or 1 for k=4
                 start = group * half
@@ -251,7 +269,7 @@ def run():
         if isinstance(node, FRRRouter):
             node.startFRR()
 
-    info("\n*** Give OSPF 3–5 seconds to converge, then use vtysh. ***\n")
+    info("\n*** Give OSPF 3–5 seconds to converge, then test connectivity. ***\n")
     CLI(net)
     net.stop()
 
