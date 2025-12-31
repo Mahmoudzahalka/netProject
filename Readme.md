@@ -5,9 +5,9 @@ in order to run the simulation :
   from inside containernet directory :
   python3 -m venv venv
   source venv/bin/activate
-  sudo -E env PATH=$PATH python3 examples/<filename>.py
+  sudo -E env PATH=$PATH python3 examples/whateversimfile.py (assuming the simulation file is in examples directory)
   
-  to close containernet:
+  to close containernet and virtual env:
   - exit command in containernet CLI
   - sudo -E env PATH=$PATH mn -c
   - deactivate
