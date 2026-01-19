@@ -11,6 +11,7 @@ fattree_containernet_frr_ring.py
 
 import os
 from time import sleep
+import re 
 
 from mininet.net import Containernet
 from mininet.node import Docker
@@ -496,6 +497,130 @@ def setup_and_start_ring(host_links):
     info("*** Ring all-reduce processes launched (background in each host)\n")
 
 
+#--------------------------------Measurments-----------------------------------
+
+def collect_ring_metrics(host_links):
+    """
+    Parse per-rank ring logs on each host and compute:
+      - total latency  = max rank latency (slowest rank)
+      - total throughput = logical gradient bytes / total latency (MiB/s)
+      - max tail      = max_latency - min_latency
+    """
+
+    info("*** Sleeping 20s for All-Reduce completion\n")
+    sleep(20)
+
+
+    # Rebuild the same host_info mapping used in setup_and_start_ring
+    host_info = {}
+    for _, _, _, host, _, host_ip in host_links:
+        ip = host_ip.split("/")[0]
+        host_info[host.name] = (host, ip)
+
+    # Use the SAME logical ring order as in setup_and_start_ring (duplicated on purpose)
+    ordered_names = [
+        "h_p0_e0_2",  # 1
+        "h_p1_e0_2",  # 2
+        "h_p2_e0_2",  # 3
+        "h_p3_e0_2",  # 4
+        "h_p0_e0_3",  # 5
+        "h_p1_e0_3",  # 6
+        "h_p2_e0_3",  # 7
+        "h_p3_e0_3",  # 8
+        "h_p0_e1_2",  # 9
+        "h_p1_e1_2",  # 10
+        "h_p2_e1_2",  # 11
+        "h_p3_e1_2",  # 12
+        "h_p0_e1_3",  # 13
+        "h_p1_e1_3",  # 14
+        "h_p2_e1_3",  # 15
+        "h_p3_e1_3",  # 16
+    ]
+    ring = [host_info[name] for name in ordered_names]
+    world_size = len(ring)
+
+    # Same gradient size logic as in setup_and_start_ring
+    elems_per_chunk = 65536
+    grad_elems = world_size * elems_per_chunk
+    gradient_bytes = grad_elems * 4.0  # float32
+
+    latencies = []
+
+    for rank, (host, _) in enumerate(ring):
+        log_file = f"/app/ring_rank{rank}.log"
+        # Grab the last TOTAL_TIME_SEC= line (if any)
+        cmd = (
+            f"grep 'TOTAL_TIME_SEC=' {log_file} | tail -n 1 2>/dev/null || true"
+        )
+        out = host.cmd(cmd)
+        line = out.strip()
+        if not line:
+            info(f"*** WARNING: no TOTAL_TIME_SEC line for rank {rank} ({host.name})\n")
+            continue
+
+        try:
+            # Expect something like: "... TOTAL_TIME_SEC=0.123456"
+            #token = line.split("TOTAL_TIME_SEC=")[-1]
+            #token= line.split("=", 1)[1].strip() 
+            #latency = float(token)
+            #latencies.append(latency)
+            
+            matches = re.findall(r"TOTAL_TIME_SEC=([0-9.]+)", line)
+            if not matches:
+                info(f"*** WARNING: could not find TOTAL_TIME_SEC in rank {rank} log\n")
+                continue
+            # Take the last one (the final completion time)
+            latency_str = matches[-1]
+            latency = float(latency_str)
+            latencies.append(latency)
+        except ValueError:
+            info(f"*** WARNING: could not parse latency from rank {rank} line: {line}\n") #this here happens
+            #info(f"*** DEBUG rank {rank} line={repr(line)} token={repr(token)}\n")
+
+    if not latencies:
+        info("*** Ring metrics: no latency data collected from logs\n")
+        return
+
+    fastest = min(latencies)
+    slowest = max(latencies)
+    max_tail = slowest - fastest
+    total_latency = slowest
+
+    # Logical gradient throughput (one all-reduced gradient per run)
+    total_throughput_bytes_per_sec = gradient_bytes / total_latency
+    total_throughput_mib_per_sec = total_throughput_bytes_per_sec / (1024.0 * 1024.0)
+    gradient_mib = gradient_bytes / (1024.0 * 1024.0)
+
+    info("*** Ring all-reduce metrics (from host logs):\n")
+    info(f"    ranks with data:          {len(latencies)}/{world_size}\n")
+    info(f"    total latency (slowest):  {total_latency:.6f} s\n")
+    info(f"    max tail (slowest-fastest): {max_tail:.6f} s\n")
+    info(f"    logical gradient size:    {gradient_mib:.3f} MiB\n")
+    info(f"    total throughput:         {total_throughput_mib_per_sec:.3f} MiB/s\n")
+
+
+    # Also append metrics to a local file on the controller
+    try:
+        with open("ring_metrics.log", "a") as f:
+            f.write("Ring all-reduce metrics:\n")
+            f.write(f"  ranks_with_data={len(latencies)}/{world_size}\n")
+            f.write(f"  total_latency_s={total_latency:.6f}\n")
+            f.write(f"  max_tail_s={max_tail:.6f}\n")
+            f.write(f"  gradient_mib={gradient_mib:.3f}\n")
+            f.write(f"  total_throughput_mib_s={total_throughput_mib_per_sec:.3f}\n")
+            f.write("\n")
+    except Exception as e:
+        info(f"*** WARNING: failed to write ring_metrics.log: {e}\n")
+
+
+#--------------------------------Measurments-----------------------------------
+
+
+
+
+
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -539,6 +664,11 @@ def run():
     # Drop into CLI while ring traffic is running in background
     info("*** Starting CLI (ring all-reduce is running in background)\n")
     CLI(net)
+
+
+    # After exiting the CLI, collect ring metrics from host logs
+    info("*** Collecting ring all-reduce metrics\n")
+    collect_ring_metrics(host_links)
 
     net.stop()
 
