@@ -1,0 +1,25 @@
+to fine tune the measurments, we are ought to increase gradient size, in order for network to domminate more than the container overhead
+becasue : Ttotal​=Tcomputation​+Toverhead​+Tnetwork​
+
+- measure at pcap/tcpdump granularity
+
+- arguably we could say that this is a temporal fidelity issue that we noticed, and our proposed solution is incorporation VT-IO paper model
+into the simulation stack, but when offering this it needs to be coherent, meaning there has to be calculation of expected latency and what we got 
+and we attribute the difference to the simulation stack (Toverhead)
+
+
+- the computation introduces new bottleneck, could use numpy to do victorized operations
+
+- we obtain a rough approximation of Tcompute and other elements in the equation above from eleminating them from script and calculating
+the difference. this is needed for explanations in the point we are going to introduce when presenting.
+
+- can present results with and without compute
+
+- we still do some large python operations other than the for, details in last gpt chat
+
+
+
+//Debug note:
+line 494 was just "&"
+
+//Debug : the gotcha is the problem everything else is fine, will look at it later on .

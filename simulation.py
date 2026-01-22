@@ -41,8 +41,8 @@ def recv_all(sock, nbytes):
 def establish_connections(rank, world_size, listen_port, right_ip, right_port, log):
     
 
-    log(f"[rank {rank}] Phase 0: setting up sockets (listen_port={listen_port}, "
-        f"right={right_ip}:{right_port})")
+    #log(f"[rank {rank}] Phase 0: setting up sockets (listen_port={listen_port}, "
+        #f"right={right_ip}:{right_port})")
 
     # Server for left neighbor
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -64,13 +64,13 @@ def establish_connections(rank, world_size, listen_port, right_ip, right_port, l
     # Accept connection from left neighbor
     conn_left, addr_left = server.accept()
     conn_left.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    log(f"[rank {rank}] accepted connection from left neighbor {addr_left}")
+    #log(f"[rank {rank}] accepted connection from left neighbor {addr_left}")
 
     # One-byte handshake to be sure both directions are live
     sock_right.sendall(b"H")
     _ = recv_all(conn_left, 1)
 
-    log(f"[rank {rank}] Phase 0: connections established to left and right.")
+    #log(f"[rank {rank}] Phase 0: connections established to left and right.")
     server.close()
     return conn_left, sock_right
 
@@ -100,8 +100,9 @@ def ring_allreduce(rank, world_size, conn_left, conn_right, grad_elems, log):
 
         if do_reduce:
             # scatter-reduce: sum into local gradient chunk
-            for i in range(elems_per_chunk):
-                grad[start + i] += in_chunk[i]
+            #for i in range(elems_per_chunk): 
+                #grad[start + i] += in_chunk[i]
+            grad[start : start + elems_per_chunk] = in_chunk #this compute is a major bottleneck, difference of 0.7 seconds for 4mb gradients, for bigger gradients it will just get bigger
         else:
             # all-gather: overwrite with fully reduced chunk
             grad[start : start + elems_per_chunk] = in_chunk
@@ -109,8 +110,8 @@ def ring_allreduce(rank, world_size, conn_left, conn_right, grad_elems, log):
     # -------------------------
     # Phase 1: scatter-reduce
     # -------------------------
-    log(f"[rank {rank}] Phase 1: scatter-reduce starting "
-        f"(grad_elems={grad_elems}, chunks={world_size}, chunk_bytes={chunk_bytes})")
+    #log(f"[rank {rank}] Phase 1: scatter-reduce starting "
+        #f"(grad_elems={grad_elems}, chunks={world_size}, chunk_bytes={chunk_bytes})")
 
     for step in range(world_size - 1):
         # Index of chunk we send this step
@@ -121,13 +122,13 @@ def ring_allreduce(rank, world_size, conn_left, conn_right, grad_elems, log):
         send_chunk(send_index)
         recv_chunk(recv_index, do_reduce=True)
 
-        log(f"[rank {rank}] Phase 1 step {step+1}/{world_size-1}: "
-            f"sent chunk {send_index}, reduced chunk {recv_index}")
+        #log(f"[rank {rank}] Phase 1 step {step+1}/{world_size-1}: "
+            #f"sent chunk {send_index}, reduced chunk {recv_index}")
 
     # -------------------------
     # Phase 2: all-gather
     # -------------------------
-    log(f"[rank {rank}] Phase 2: all-gather starting")
+    #log(f"[rank {rank}] Phase 2: all-gather starting")
 
     for step in range(world_size - 1):
         send_index = (rank - step) % world_size
@@ -136,10 +137,10 @@ def ring_allreduce(rank, world_size, conn_left, conn_right, grad_elems, log):
         send_chunk(send_index)
         recv_chunk(recv_index, do_reduce=False)
 
-        log(f"[rank {rank}] Phase 2 step {step+1}/{world_size-1}: "
-            f"sent chunk {send_index}, received fully-reduced chunk {recv_index}")
+        #log(f"[rank {rank}] Phase 2 step {step+1}/{world_size-1}: "
+            #f"sent chunk {send_index}, received fully-reduced chunk {recv_index}")
 
-    log(f"[rank {rank}] Ring all-reduce completed")
+    #log(f"[rank {rank}] Ring all-reduce completed")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -161,9 +162,9 @@ def main():
             with open(args.log_file, "a") as f:
                 f.write(line + "\n")
 
-    log(f"[rank {args.rank}] Starting ring node with world_size={args.world_size}, "
-        f"listen_port={args.listen_port}, right={args.right_ip}:{args.right_port}, "
-        f"grad_elems={args.grad_elems}")
+    #log(f"[rank {args.rank}] Starting ring node with world_size={args.world_size}, "
+        #f"listen_port={args.listen_port}, right={args.right_ip}:{args.right_port}, "
+        #f"grad_elems={args.grad_elems}")
 
     conn_left, conn_right = establish_connections(
         args.rank, args.world_size,
@@ -179,7 +180,7 @@ def main():
 
     conn_left.close()
     conn_right.close()
-    log(f"[rank {args.rank}] Connections closed, exiting.")
+    #log(f"[rank {args.rank}] Connections closed, exiting.")
 
 if __name__ == "__main__":
     main()
@@ -453,9 +454,9 @@ def setup_and_start_ring(host_links):
     info(f"*** Ring hosts (world_size={world_size}): "
          f"{', '.join(ordered_names)}\n")
 
-    # Gradient size: world_size chunks, each 65536 floats (256 KB).
+    # Gradient size: world_size chunks, each 65536 floats (256 KB). 524288 
     # Total per-host gradient ~ 4 MB for world_size=16.
-    elems_per_chunk = 65536
+    elems_per_chunk = 65536 #Mahmoud: changed from 65536 to 524288 to increase data size now each chunk is 2MB //gradient size is 32MB 
     grad_elems = world_size * elems_per_chunk
 
     base_port = 5000  # base TCP port for ring connections
@@ -613,6 +614,114 @@ def collect_ring_metrics(host_links):
         info(f"*** WARNING: failed to write ring_metrics.log: {e}\n")
 
 
+
+#-------------------Per-link Measurments-----------------------
+def read_if_counters(node, ifname):
+    """
+    Read tx_bytes and rx_bytes for a given interface inside a Mininet/Containernet node.
+    Returns a tuple (tx_bytes, rx_bytes) as integers.
+    """
+
+    _ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")  # local definition
+    # Paths inside the container namespace
+    base = f"/sys/class/net/{ifname}/statistics"
+    tx = node.cmd(f"cat {base}/tx_bytes 2>/dev/null || echo 0").strip()
+    #rx = node.cmd(f"cat {base}/rx_bytes 2>/dev/null || echo 0").strip()
+    out = node.cmd(
+        f"cat {base}/tx_bytes {base}/rx_bytes 2>&1 || echo '0 0'"
+    ).strip()
+    clean = _ansi.sub("", out).replace("\r", "")
+    nums = re.findall(r"\b\d+\b", clean)
+
+    try:
+        if len(nums) >= 2:
+            tx = int(nums[-2])
+            rx = int(nums[-1])
+            return tx, rx
+    except ValueError:
+        #info(f"*** DEBUG rx={rx} \n")
+        info(f"*** GOTCHAAAAAA\n")
+        return 0, 0
+    
+    return 0, 0
+
+    # Expect two tokens: tx rx
+    #parts = out.split()
+    #if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+    #    return int(parts[0]), int(parts[1])
+
+    # Debug if unexpected output
+    #info(f"*** DEBUG bad counter read node={node.name} if={ifname} out={out!r}\n")
+    #if rx == "" :
+     #   info(f"*** DEBUG EMPTY RX\n")
+    #if( tx == "" ):
+     #   info(f"*** DEBUG EMPTY TX\n")
+    #info(f"*** DEBUG tx={tx} rx={rx} \n")
+    #try:
+    #    return int(tx), int(rx)
+    #except ValueError:
+    #    #info(f"*** DEBUG rx={rx} \n")
+    #    info(f"*** GOTCHAAAAAA\n")
+    #    return 0, 0
+
+def snapshot_all_link_counters(p2p_links, host_links):
+    """
+    Take a snapshot of tx/rx counters for all router-router and router-host interfaces.
+    Returns a dict keyed by (node.name, ifname).
+    """
+    snap = {}
+
+    # Router <-> router links
+    for n1, if1, _, n2, if2, _ in p2p_links:
+        snap[(n1.name, if1)] = read_if_counters(n1, if1)
+        snap[(n2.name, if2)] = read_if_counters(n2, if2)
+
+    # Router <-> host links
+    for n1, if1, _, n2, if2, _ in host_links:
+        snap[(n1.name, if1)] = read_if_counters(n1, if1)
+        snap[(n2.name, if2)] = read_if_counters(n2, if2)
+
+    return snap
+
+
+def report_raw_link_load(before_snap, p2p_links, host_links):
+    """
+    Compare current counters to 'before_snap' and print raw byte deltas per interface.
+    """
+    info("*** Raw link load (tx_bytes, rx_bytes per interface during ring) ***\n")
+
+    seen = set()
+
+    def report_for(node, ifname, role):
+        key = (node.name, ifname)
+        if key in seen:
+            return
+        seen.add(key)
+
+        tx0, rx0 = before_snap.get(key, (0, 0)) #TODO: check about the default argument
+        tx1, rx1 = read_if_counters(node, ifname)
+        dtx = tx1 - tx0
+        drx = rx1 - rx0
+        #info(f"  {role} {node.name}:{ifname}  Δtx={dtx} B  Δrx={drx} B\n") #change this to write to a file
+        try:
+            with open("link_load.log", "a") as f:
+                f.write("Raw link load for one ring run:\n") #TODO: can make this bit cleaner later though
+                f.write(f"  {role} {node.name}:{ifname}  Δtx={dtx} B  Δrx={drx} B\n")
+                #f.write("\n")
+        except Exception as e:
+            info(f"*** WARNING: failed to write link_load.log: {e}\n")
+
+    # Router <-> router
+    for n1, if1, _, n2, if2, _ in p2p_links:
+        report_for(n1, if1, "R-R")
+        report_for(n2, if2, "R-R")
+
+    # Router <-> host
+    for n1, if1, _, n2, if2, _ in host_links:
+        report_for(n1, if1, "R-H")
+        report_for(n2, if2, "R-H")
+
+#-------------------Per-link Measurments-----------------------
 #--------------------------------Measurments-----------------------------------
 
 
@@ -658,6 +767,10 @@ def run():
     info("*** Sleeping 10s for OSPF convergence\n")
     sleep(10)
 
+
+    # Take baseline link counters before starting the ring - Per-link measurements
+    link_counters_before = snapshot_all_link_counters(p2p_links, host_links)
+
     # Start ring all-reduce across hosts (includes Phase 0 socket setup)
     setup_and_start_ring(host_links)
 
@@ -669,6 +782,10 @@ def run():
     # After exiting the CLI, collect ring metrics from host logs
     info("*** Collecting ring all-reduce metrics\n")
     collect_ring_metrics(host_links)
+
+    # Now report raw link load based on byte deltas - Per-link measurements
+    info("*** Collecting raw link load\n")
+    report_raw_link_load(link_counters_before, p2p_links, host_links)
 
     net.stop()
 
