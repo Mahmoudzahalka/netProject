@@ -1,0 +1,7 @@
+Ring all-reduce metrics:
+  ranks_with_data=16/16
+  total_latency_s=0.249603
+  max_tail_s=0.140969
+  gradient_mib=4.000
+  total_throughput_mib_s=16.025
+
