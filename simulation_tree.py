@@ -20,14 +20,15 @@ from mininet.link import TCLink
 from mininet.log import info, setLogLevel
 
 # ---------------------------------------------------------------------------
-# Host-side ring all-reduce script, injected into each host container
+# Host-side hierarchical tree all-reduce script, injected into each host container
 # ---------------------------------------------------------------------------
 
-RING_NODE_SCRIPT = r"""#!/usr/bin/env python3
+TREE_NODE_SCRIPT = r"""#!/usr/bin/env python3
 import argparse
 import socket
 import time
 from array import array
+
 
 def recv_all(sock, nbytes):
     data = bytearray()
@@ -38,118 +39,97 @@ def recv_all(sock, nbytes):
         data.extend(chunk)
     return data
 
-def establish_connections(rank, world_size, listen_port, right_ip, right_port, log):
-    
 
-    #log(f"[rank {rank}] Phase 0: setting up sockets (listen_port={listen_port}, "
-        #f"right={right_ip}:{right_port})")
+def parse_children(children_str):
+    if not children_str:
+        return []
+    out = []
+    for token in children_str.split(","):
+        token = token.strip()
+        if token:
+            rank_str, ip, port_str = token.split(":")
+            out.append((int(rank_str), ip, int(port_str)))
+    return out
 
-    # Server for left neighbor
+
+def establish_tree_connections(rank, listen_port, parent_ip, parent_port, children, log):
+    expected_children = len(children)
+    child_rank_set = {child_rank for child_rank, _, _ in children}
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("", listen_port))
-    server.listen(1)
+    server.listen(max(1, expected_children))
 
-    # Client to right neighbor, with retry to avoid timing issues
-    while True:
-        try:
-            sock_right = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock_right.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock_right.connect((right_ip, right_port))
-            break
-        except Exception as e:
-            log(f"[rank {rank}] connect to right failed ({e}), retrying...")
-            time.sleep(0.1)
+    parent_sock = None
+    if parent_ip:
+        while True:
+            try:
+                parent_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                parent_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                parent_sock.connect((parent_ip, parent_port))
+                parent_sock.sendall(rank.to_bytes(4, byteorder="big", signed=False))
+                _ = recv_all(parent_sock, 1)
+                break
+            except Exception as e:
+                log(f"[rank {rank}] connect to parent failed ({e}), retrying...")
+                time.sleep(0.1)
 
-    # Accept connection from left neighbor
-    conn_left, addr_left = server.accept()
-    conn_left.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    #log(f"[rank {rank}] accepted connection from left neighbor {addr_left}")
+    child_socks = []
+    while len(child_socks) < expected_children:
+        conn, _ = server.accept()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        child_rank = int.from_bytes(recv_all(conn, 4), byteorder="big", signed=False)
+        if child_rank not in child_rank_set:
+            conn.close()
+            raise RuntimeError(f"Unexpected child rank {child_rank} for rank {rank}")
+        conn.sendall(b"H")
+        child_socks.append((child_rank, conn))
 
-    # One-byte handshake to be sure both directions are live
-    sock_right.sendall(b"H")
-    _ = recv_all(conn_left, 1)
-
-    #log(f"[rank {rank}] Phase 0: connections established to left and right.")
+    child_socks.sort(key=lambda x: x[0])
     server.close()
-    return conn_left, sock_right
+    return parent_sock, [sock for _, sock in child_socks]
 
-def ring_allreduce(rank, world_size, conn_left, conn_right, grad_elems, log):
-    
 
-    # Make grad_elems divisible by world_size (enforced in caller)
-    elems_per_chunk = grad_elems // world_size
-    assert grad_elems % world_size == 0
+def recv_full_grad(sock, grad_elems):
+    in_bytes = recv_all(sock, grad_elems * 4)
+    grad = array("f")
+    grad.frombytes(in_bytes)
+    return grad
 
-    # Local gradient initialized with rank (just for sanity/testing)
+
+def send_full_grad(sock, grad):
+    sock.sendall(grad.tobytes())
+
+
+def add_inplace(dst, src):
+    for i in range(len(dst)):
+        dst[i] += src[i]
+
+
+def tree_allreduce(rank, parent_sock, child_socks, grad_elems, log):
     grad = array("f", [float(rank)] * grad_elems)
 
-    # Each float32 is 4 bytes
-    chunk_bytes = elems_per_chunk * 4
+    for child_sock in child_socks:
+        child_grad = recv_full_grad(child_sock, grad_elems)
+        add_inplace(grad, child_grad)
 
-    def send_chunk(chunk_index):
-        start = chunk_index * elems_per_chunk
-        out_chunk = grad[start : start + elems_per_chunk]
-        conn_right.sendall(out_chunk.tobytes())
+    if parent_sock is not None:
+        send_full_grad(parent_sock, grad)
+        grad = recv_full_grad(parent_sock, grad_elems)
 
-    def recv_chunk(chunk_index, do_reduce):
-        start = chunk_index * elems_per_chunk
-        in_bytes = recv_all(conn_left, chunk_bytes)
-        in_chunk = array("f")
-        in_chunk.frombytes(in_bytes)
+    for child_sock in child_socks:
+        send_full_grad(child_sock, grad)
 
-        if do_reduce:
-            # scatter-reduce: sum into local gradient chunk
-            #for i in range(elems_per_chunk): 
-                #grad[start + i] += in_chunk[i]
-            grad[start : start + elems_per_chunk] = in_chunk #this compute is a major bottleneck, difference of 0.7 seconds for 4mb gradients, for bigger gradients it will just get bigger
-        else:
-            # all-gather: overwrite with fully reduced chunk
-            grad[start : start + elems_per_chunk] = in_chunk
-
-    # -------------------------
-    # Phase 1: scatter-reduce
-    # -------------------------
-    #log(f"[rank {rank}] Phase 1: scatter-reduce starting "
-        #f"(grad_elems={grad_elems}, chunks={world_size}, chunk_bytes={chunk_bytes})")
-
-    for step in range(world_size - 1):
-        # Index of chunk we send this step
-        send_index = (rank - step) % world_size
-        # Index of chunk we receive and reduce this step
-        recv_index = (rank - step - 1) % world_size
-
-        send_chunk(send_index)
-        recv_chunk(recv_index, do_reduce=True)
-
-        #log(f"[rank {rank}] Phase 1 step {step+1}/{world_size-1}: "
-            #f"sent chunk {send_index}, reduced chunk {recv_index}")
-
-    # -------------------------
-    # Phase 2: all-gather
-    # -------------------------
-    #log(f"[rank {rank}] Phase 2: all-gather starting")
-
-    for step in range(world_size - 1):
-        send_index = (rank - step) % world_size
-        recv_index = (rank - step - 1) % world_size
-
-        send_chunk(send_index)
-        recv_chunk(recv_index, do_reduce=False)
-
-        #log(f"[rank {rank}] Phase 2 step {step+1}/{world_size-1}: "
-            #f"sent chunk {send_index}, received fully-reduced chunk {recv_index}")
-
-    #log(f"[rank {rank}] Ring all-reduce completed")
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--rank", type=int, required=True)
     parser.add_argument("--world-size", type=int, required=True)
     parser.add_argument("--listen-port", type=int, required=True)
-    parser.add_argument("--right-ip", type=str, required=True)
-    parser.add_argument("--right-port", type=int, required=True)
-    # Total gradient length (float32 elements). Must be divisible by world_size.
+    parser.add_argument("--parent-ip", type=str, default="")
+    parser.add_argument("--parent-port", type=int, default=0)
+    parser.add_argument("--children", type=str, default="")
     parser.add_argument("--grad-elems", type=int, default=1048576)
     parser.add_argument("--log-file", type=str, default=None)
     args = parser.parse_args()
@@ -162,25 +142,27 @@ def main():
             with open(args.log_file, "a") as f:
                 f.write(line + "\n")
 
-    #log(f"[rank {args.rank}] Starting ring node with world_size={args.world_size}, "
-        #f"listen_port={args.listen_port}, right={args.right_ip}:{args.right_port}, "
-        #f"grad_elems={args.grad_elems}")
-
-    conn_left, conn_right = establish_connections(
-        args.rank, args.world_size,
-        args.listen_port, args.right_ip, args.right_port,
-        log
+    children = parse_children(args.children)
+    parent_sock, child_socks = establish_tree_connections(
+        args.rank,
+        args.listen_port,
+        args.parent_ip,
+        args.parent_port,
+        children,
+        log,
     )
 
     t0 = time.time()
-    ring_allreduce(args.rank, args.world_size, conn_left, conn_right, args.grad_elems, log)
+    tree_allreduce(args.rank, parent_sock, child_socks, args.grad_elems, log)
     t1 = time.time()
 
     log(f"[rank {args.rank}] TOTAL_TIME_SEC={t1 - t0:.6f}")
 
-    conn_left.close()
-    conn_right.close()
-    #log(f"[rank {args.rank}] Connections closed, exiting.")
+    if parent_sock is not None:
+        parent_sock.close()
+    for child_sock in child_socks:
+        child_sock.close()
+
 
 if __name__ == "__main__":
     main()
@@ -412,25 +394,21 @@ def build_fattree_k4(net, p2p_alloc, ROUTER_IMG, HOST_IMG):
 
 
 # ---------------------------------------------------------------------------
-# Inject ring_node.py into hosts and start ring all-reduce
+# Inject tree_node.py into hosts and start hierarchical tree all-reduce
 # ---------------------------------------------------------------------------
 
-def setup_and_start_ring(host_links):
+def setup_and_start_tree(host_links):
     """
-    - Build a stable ring order over all hosts (sorted by name).
-    - Push ring_node.py into each host under /app/.
-    - Start one ring process per host, with explicit Phase 0 (socket setup) inside.
+    - Build a stable host order over all hosts.
+    - Push tree_node.py into each host under /app/.
+    - Start one hierarchical tree all-reduce process per host.
     """
 
-    # Collect unique hosts and their IPs
     host_info = {}
     for _, _, _, host, _, host_ip in host_links:
         ip = host_ip.split("/")[0]
         host_info[host.name] = (host, ip)
 
-    #Mahmoud: here we define the order of hosts inside the logical ring
-    # Stable ring order: lexicographic by host name
-    #ordered_names = sorted(host_info.keys())
     ordered_names = [
     "h_p0_e0_2",  # 1
     "h_p1_e0_2",  # 2
@@ -448,61 +426,82 @@ def setup_and_start_ring(host_links):
     "h_p1_e1_3",  # 14
     "h_p2_e1_3",  # 15
     "h_p3_e1_3",  # 16
-    ]   
-    ring = [host_info[name] for name in ordered_names]
-    world_size = len(ring)
-    info(f"*** Ring hosts (world_size={world_size}): "
+    ]
+    tree_hosts = [host_info[name] for name in ordered_names]
+    world_size = len(tree_hosts)
+    info(f"*** Tree hosts (world_size={world_size}): "
          f"{', '.join(ordered_names)}\n")
 
-    # Gradient size: world_size chunks, each 65536 floats (256 KB). 524288 
-    # Total per-host gradient ~ 4 MB for world_size=16.
-    elems_per_chunk = 65536#Mahmoud: changed from 65536 to 524288 to increase data size now each chunk is 2MB //gradient size is 32MB 
+    elems_per_chunk = 65536
     grad_elems = world_size * elems_per_chunk
 
-    base_port = 5000  # base TCP port for ring connections
+    base_port = 5000
+    ranks = {name: rank for rank, name in enumerate(ordered_names)}
 
-    # Push ring_node.py into each host
-    info("*** Distributing ring_node.py to hosts\n") #Mahmoud : need to make sure this works correctly, as past experiments had issues with file empty
-    for host, _ in ring:                             #Mahmoud: may need to change to printf like before
+    children_by_name = {
+        "h_p0_e0_2": ["h_p0_e0_3", "h_p0_e1_2", "h_p1_e0_2", "h_p2_e0_2", "h_p3_e0_2"],
+        "h_p0_e1_2": ["h_p0_e1_3"],
+        "h_p1_e0_2": ["h_p1_e0_3", "h_p1_e1_2"],
+        "h_p1_e1_2": ["h_p1_e1_3"],
+        "h_p2_e0_2": ["h_p2_e0_3", "h_p2_e1_2"],
+        "h_p2_e1_2": ["h_p2_e1_3"],
+        "h_p3_e0_2": ["h_p3_e0_3", "h_p3_e1_2"],
+        "h_p3_e1_2": ["h_p3_e1_3"],
+    }
+
+    parent_by_name = {}
+    for parent_name, child_names in children_by_name.items():
+        for child_name in child_names:
+            parent_by_name[child_name] = parent_name
+
+    info("*** Distributing tree_node.py to hosts\n")
+    for host, _ in tree_hosts:
         host.cmd("mkdir -p /app")
-        """
-        host.cmd(
-            "bash -c 'cat > /app/ring_node.py << \"EOF\"\n"
-            + RING_NODE_SCRIPT +
-            "\nEOF'"
-        )
-        """
-        host.cmd(f"printf '%s\n' '{RING_NODE_SCRIPT}' > /app/ring_node.py")
-        host.cmd("chmod +x /app/ring_node.py")
+        host.cmd(f"printf '%s\n' '{TREE_NODE_SCRIPT}' > /app/tree_node.py")
+        host.cmd("chmod +x /app/tree_node.py")
 
-    # Start one ring process per host
-    info("*** Starting ring all-reduce on all hosts\n")
-    for rank, (host, ip) in enumerate(ring):
-        _, right_ip = ring[(rank + 1) % world_size]
-
+    info("*** Starting hierarchical tree all-reduce on all hosts\n")
+    for rank, (host, ip) in enumerate(tree_hosts):
+        host_name = ordered_names[rank]
         listen_port = base_port + rank
-        right_port = base_port + ((rank + 1) % world_size)
-        log_file = f"/app/ring_rank{rank}.log"
+        log_file = f"/app/tree_rank{rank}.log"
+
+        parent_name = parent_by_name.get(host_name)
+        if parent_name is None:
+            parent_ip = ""
+            parent_port = 0
+        else:
+            _, parent_ip = host_info[parent_name]
+            parent_port = base_port + ranks[parent_name]
+
+        child_specs = []
+        for child_name in children_by_name.get(host_name, []):
+            child_rank = ranks[child_name]
+            _, child_ip = host_info[child_name]
+            child_port = base_port + child_rank
+            child_specs.append(f"{child_rank}:{child_ip}:{child_port}")
+        children_arg = ",".join(child_specs)
 
         cmd = (
-            "python3 /app/ring_node.py "
+            "python3 /app/tree_node.py "
             f"--rank {rank} --world-size {world_size} "
             f"--listen-port {listen_port} "
-            f"--right-ip {right_ip} --right-port {right_port} "
+            f"--parent-ip '{parent_ip}' --parent-port {parent_port} "
+            f"--children '{children_arg}' "
             f"--grad-elems {grad_elems} "
             f"--log-file {log_file} "
             "&"
         )
         host.cmd(cmd)
 
-    info("*** Ring all-reduce processes launched (background in each host)\n")
+    info("*** Hierarchical tree all-reduce processes launched (background in each host)\n")
 
 
 #--------------------------------Measurments-----------------------------------
 
-def collect_ring_metrics(host_links):
+def collect_tree_metrics(host_links):
     """
-    Parse per-rank ring logs on each host and compute:
+    Parse per-rank tree logs on each host and compute:
       - total latency  = max rank latency (slowest rank)
       - total throughput = logical gradient bytes / total latency (MiB/s)
       - max tail      = max_latency - min_latency
@@ -511,14 +510,11 @@ def collect_ring_metrics(host_links):
     info("*** Sleeping 20s for All-Reduce completion\n")
     sleep(20)
 
-
-    # Rebuild the same host_info mapping used in setup_and_start_ring
     host_info = {}
     for _, _, _, host, _, host_ip in host_links:
         ip = host_ip.split("/")[0]
         host_info[host.name] = (host, ip)
 
-    # Use the SAME logical ring order as in setup_and_start_ring (duplicated on purpose)
     ordered_names = [
         "h_p0_e0_2",  # 1
         "h_p1_e0_2",  # 2
@@ -537,19 +533,17 @@ def collect_ring_metrics(host_links):
         "h_p2_e1_3",  # 15
         "h_p3_e1_3",  # 16
     ]
-    ring = [host_info[name] for name in ordered_names]
-    world_size = len(ring)
+    tree_hosts = [host_info[name] for name in ordered_names]
+    world_size = len(tree_hosts)
 
-    # Same gradient size logic as in setup_and_start_ring
     elems_per_chunk = 65536
     grad_elems = world_size * elems_per_chunk
-    gradient_bytes = grad_elems * 4.0  # float32
+    gradient_bytes = grad_elems * 4.0
 
     latencies = []
 
-    for rank, (host, _) in enumerate(ring):
-        log_file = f"/app/ring_rank{rank}.log"
-        # Grab the last TOTAL_TIME_SEC= line (if any)
+    for rank, (host, _) in enumerate(tree_hosts):
+        log_file = f"/app/tree_rank{rank}.log"
         cmd = (
             f"grep 'TOTAL_TIME_SEC=' {log_file} | tail -n 1 2>/dev/null || true"
         )
@@ -560,26 +554,18 @@ def collect_ring_metrics(host_links):
             continue
 
         try:
-            # Expect something like: "... TOTAL_TIME_SEC=0.123456"
-            #token = line.split("TOTAL_TIME_SEC=")[-1]
-            #token= line.split("=", 1)[1].strip() 
-            #latency = float(token)
-            #latencies.append(latency)
-            
             matches = re.findall(r"TOTAL_TIME_SEC=([0-9.]+)", line)
             if not matches:
                 info(f"*** WARNING: could not find TOTAL_TIME_SEC in rank {rank} log\n")
                 continue
-            # Take the last one (the final completion time)
             latency_str = matches[-1]
             latency = float(latency_str)
             latencies.append(latency)
         except ValueError:
-            info(f"*** WARNING: could not parse latency from rank {rank} line: {line}\n") #this here happens
-            #info(f"*** DEBUG rank {rank} line={repr(line)} token={repr(token)}\n")
+            info(f"*** WARNING: could not parse latency from rank {rank} line: {line}\n")
 
     if not latencies:
-        info("*** Ring metrics: no latency data collected from logs\n")
+        info("*** Tree metrics: no latency data collected from logs\n")
         return
 
     fastest = min(latencies)
@@ -587,23 +573,20 @@ def collect_ring_metrics(host_links):
     max_tail = slowest - fastest
     total_latency = slowest
 
-    # Logical gradient throughput (one all-reduced gradient per run)
     total_throughput_bytes_per_sec = gradient_bytes / total_latency
     total_throughput_mib_per_sec = total_throughput_bytes_per_sec / (1024.0 * 1024.0)
     gradient_mib = gradient_bytes / (1024.0 * 1024.0)
 
-    info("*** Ring all-reduce metrics (from host logs):\n")
+    info("*** Hierarchical tree all-reduce metrics (from host logs):\n")
     info(f"    ranks with data:          {len(latencies)}/{world_size}\n")
     info(f"    total latency (slowest):  {total_latency:.6f} s\n")
     info(f"    max tail (slowest-fastest): {max_tail:.6f} s\n")
     info(f"    logical gradient size:    {gradient_mib:.3f} MiB\n")
     info(f"    total throughput:         {total_throughput_mib_per_sec:.3f} MiB/s\n")
 
-
-    # Also append metrics to a local file on the controller
     try:
-        with open("ring_metrics.log", "a") as f:
-            f.write("Ring all-reduce metrics:\n")
+        with open("tree_metrics.log", "a") as f:
+            f.write("Hierarchical tree all-reduce metrics:\n")
             f.write(f"  ranks_with_data={len(latencies)}/{world_size}\n")
             f.write(f"  total_latency_s={total_latency:.6f}\n")
             f.write(f"  max_tail_s={max_tail:.6f}\n")
@@ -611,9 +594,7 @@ def collect_ring_metrics(host_links):
             f.write(f"  total_throughput_mib_s={total_throughput_mib_per_sec:.3f}\n")
             f.write("\n")
     except Exception as e:
-        info(f"*** WARNING: failed to write ring_metrics.log: {e}\n")
-
-
+        info(f"*** WARNING: failed to write tree_metrics.log: {e}\n")
 
 #-------------------Per-link Measurments-----------------------
 def read_if_counters(node, ifname):
@@ -688,7 +669,7 @@ def report_raw_link_load(before_snap, p2p_links, host_links):
     """
     Compare current counters to 'before_snap' and print raw byte deltas per interface.
     """
-    info("*** Raw link load (tx_bytes, rx_bytes per interface during ring) ***\n")
+    info("*** Raw link load (tx_bytes, rx_bytes per interface during tree all-reduce) ***\n")
 
     seen = set()
 
@@ -704,8 +685,8 @@ def report_raw_link_load(before_snap, p2p_links, host_links):
         drx = rx1 - rx0
         #info(f"  {role} {node.name}:{ifname}  Δtx={dtx} B  Δrx={drx} B\n") #change this to write to a file
         try:
-            with open("link_load.log", "a") as f:
-                f.write("Raw link load for one ring run:\n") #TODO: can make this bit cleaner later though
+            with open("tree_link_load.log", "a") as f:
+                f.write("Raw link load for one hierarchical tree run:\n") #TODO: can make this bit cleaner later though
                 f.write(f"  {role} {node.name}:{ifname}  Δtx={dtx} B  Δrx={drx} B\n")
                 #f.write("\n")
         except Exception as e:
@@ -768,20 +749,20 @@ def run():
     sleep(10)
 
 
-    # Take baseline link counters before starting the ring - Per-link measurements
+    # Take baseline link counters before starting the tree all-reduce - Per-link measurements
     link_counters_before = snapshot_all_link_counters(p2p_links, host_links)
 
-    # Start ring all-reduce across hosts (includes Phase 0 socket setup)
-    setup_and_start_ring(host_links)
+    # Start hierarchical tree all-reduce across hosts
+    setup_and_start_tree(host_links)
 
-    # Drop into CLI while ring traffic is running in background
-    info("*** Starting CLI (ring all-reduce is running in background)\n")
+    # Drop into CLI while tree traffic is running in background
+    info("*** Starting CLI (hierarchical tree all-reduce is running in background)\n")
     CLI(net)
 
 
-    # After exiting the CLI, collect ring metrics from host logs
-    info("*** Collecting ring all-reduce metrics\n")
-    collect_ring_metrics(host_links)
+    # After exiting the CLI, collect tree metrics from host logs
+    info("*** Collecting hierarchical tree all-reduce metrics\n")
+    collect_tree_metrics(host_links)
 
     # Now report raw link load based on byte deltas - Per-link measurements
     info("*** Collecting raw link load\n")
@@ -792,6 +773,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
-
-#just a reminding note: when changing gradient size change from setup and also the second place search 65536
