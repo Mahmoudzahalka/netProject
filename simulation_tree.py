@@ -102,17 +102,12 @@ def send_full_grad(sock, grad):
     sock.sendall(grad.tobytes())
 
 
-def add_inplace(dst, src):
-    for i in range(len(dst)):
-        dst[i] += src[i]
-
-
 def tree_allreduce(rank, parent_sock, child_socks, grad_elems, log):
     grad = array("f", [float(rank)] * grad_elems)
 
     for child_sock in child_socks:
         child_grad = recv_full_grad(child_sock, grad_elems)
-        add_inplace(grad, child_grad)
+        grad = child_grad #this compute is a major bottleneck, difference of 0.7 seconds for 4mb gradients, for bigger gradients it will just get bigger
 
     if parent_sock is not None:
         send_full_grad(parent_sock, grad)
@@ -363,6 +358,7 @@ def build_fattree_k4(net, p2p_alloc, ROUTER_IMG, HOST_IMG):
                     host,
                     params1={"ip": r_ip},
                     params2={"ip": h_ip},
+                    bw=250,  # 1 Gbps bandwidth
                 )
 
                 # record the *actual* interface names created for this link
@@ -376,7 +372,7 @@ def build_fattree_k4(net, p2p_alloc, ROUTER_IMG, HOST_IMG):
         for er in edge_per_pod[p]:
             for ar in agg_per_pod[p]:
                 ip1, ip2 = p2p_alloc.next31()
-                link = net.addLink(er, ar, params1={"ip": ip1}, params2={"ip": ip2})
+                link = net.addLink(er, ar, params1={"ip": ip1}, params2={"ip": ip2},bw=500)
                 p2p_links.append((er, link.intf1.name, ip1,
                                   ar, link.intf2.name, ip2))
 
@@ -386,7 +382,7 @@ def build_fattree_k4(net, p2p_alloc, ROUTER_IMG, HOST_IMG):
         for idx, ar in enumerate(agg_per_pod[p]):
             for c_r in core[idx * half:(idx + 1) * half]:
                 ip1, ip2 = p2p_alloc.next31()
-                link = net.addLink(ar, c_r, params1={"ip": ip1}, params2={"ip": ip2})
+                link = net.addLink(ar, c_r, params1={"ip": ip1}, params2={"ip": ip2},bw=1000)
                 p2p_links.append((ar, link.intf1.name, ip1,
                                   c_r, link.intf2.name, ip2))
 
@@ -432,7 +428,7 @@ def setup_and_start_tree(host_links):
     info(f"*** Tree hosts (world_size={world_size}): "
          f"{', '.join(ordered_names)}\n")
 
-    elems_per_chunk = 65536
+    elems_per_chunk = 98304 
     grad_elems = world_size * elems_per_chunk
 
     base_port = 5000
@@ -536,7 +532,7 @@ def collect_tree_metrics(host_links):
     tree_hosts = [host_info[name] for name in ordered_names]
     world_size = len(tree_hosts)
 
-    elems_per_chunk = 65536
+    elems_per_chunk = 98304
     grad_elems = world_size * elems_per_chunk
     gradient_bytes = grad_elems * 4.0
 

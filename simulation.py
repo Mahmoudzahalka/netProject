@@ -381,6 +381,7 @@ def build_fattree_k4(net, p2p_alloc, ROUTER_IMG, HOST_IMG):
                     host,
                     params1={"ip": r_ip},
                     params2={"ip": h_ip},
+                    bw=250,  # 1 Gbps bandwidth
                 )
 
                 # record the *actual* interface names created for this link
@@ -394,7 +395,7 @@ def build_fattree_k4(net, p2p_alloc, ROUTER_IMG, HOST_IMG):
         for er in edge_per_pod[p]:
             for ar in agg_per_pod[p]:
                 ip1, ip2 = p2p_alloc.next31()
-                link = net.addLink(er, ar, params1={"ip": ip1}, params2={"ip": ip2})
+                link = net.addLink(er, ar, params1={"ip": ip1}, params2={"ip": ip2},bw=500)
                 p2p_links.append((er, link.intf1.name, ip1,
                                   ar, link.intf2.name, ip2))
 
@@ -404,7 +405,7 @@ def build_fattree_k4(net, p2p_alloc, ROUTER_IMG, HOST_IMG):
         for idx, ar in enumerate(agg_per_pod[p]):
             for c_r in core[idx * half:(idx + 1) * half]:
                 ip1, ip2 = p2p_alloc.next31()
-                link = net.addLink(ar, c_r, params1={"ip": ip1}, params2={"ip": ip2})
+                link = net.addLink(ar, c_r, params1={"ip": ip1}, params2={"ip": ip2},bw=1000)
                 p2p_links.append((ar, link.intf1.name, ip1,
                                   c_r, link.intf2.name, ip2))
 
@@ -456,7 +457,7 @@ def setup_and_start_ring(host_links):
 
     # Gradient size: world_size chunks, each 65536 floats (256 KB). 524288 
     # Total per-host gradient ~ 4 MB for world_size=16.
-    elems_per_chunk = 65536#Mahmoud: changed from 65536 to 524288 to increase data size now each chunk is 2MB //gradient size is 32MB 
+    elems_per_chunk = 98304#Mahmoud: changed from 65536 to 524288 to increase data size now each chunk is 2MB //gradient size is 32MB 
     grad_elems = world_size * elems_per_chunk
 
     base_port = 5000  # base TCP port for ring connections
@@ -541,7 +542,7 @@ def collect_ring_metrics(host_links):
     world_size = len(ring)
 
     # Same gradient size logic as in setup_and_start_ring
-    elems_per_chunk = 65536
+    elems_per_chunk = 98304
     grad_elems = world_size * elems_per_chunk
     gradient_bytes = grad_elems * 4.0  # float32
 
@@ -792,6 +793,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
-
-#just a reminding note: when changing gradient size change from setup and also the second place search 65536
