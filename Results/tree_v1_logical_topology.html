@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tree All-Reduce v1 — Logical Topology</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0e1117; font-family: 'DM Sans', system-ui, sans-serif; color: #c9d1d9; padding: 32px 24px 48px; display: flex; flex-direction: column; align-items: center; }
+  h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 4px; color: #e6edf3; }
+  .subtitle { font-size: 13px; color: #8b949e; margin-bottom: 24px; }
+  .legend { display: flex; gap: 16px; margin-bottom: 20px; font-size: 12px; color: #8b949e; flex-wrap: wrap; justify-content: center; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+  svg { display: block; width: 100%; max-width: 1100px; height: auto; }
+</style>
+</head>
+<body>
+<h1>Tree All-Reduce v1 — Logical Topology</h1>
+<p class="subtitle">16 hosts · Depth 3 · Root fan-out: 5 (1 leaf + 4 internal) · Internal fan-out: 1–2</p>
+<div class="legend">
+<div class="legend-item"><div class="legend-dot" style="background: #f0883e;"></div> Root (5 children)</div>
+<div class="legend-item"><div class="legend-dot" style="background: #b392f0;"></div> Internal</div>
+<div class="legend-item"><div class="legend-dot" style="background: #56d4a0;"></div> Leaf</div>
+</div>
+<svg viewBox="0 0 1400 640" xmlns="http://www.w3.org/2000/svg">
+<line x1="700" y1="70" x2="140" y2="240" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="700" y1="70" x2="350" y2="240" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="700" y1="70" x2="630" y2="240" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="700" y1="70" x2="910" y2="240" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="700" y1="70" x2="1190" y2="240" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="350" y1="240" x2="350" y2="410" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="630" y1="240" x2="560" y2="410" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="630" y1="240" x2="700" y2="410" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="910" y1="240" x2="840" y2="410" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="910" y1="240" x2="980" y2="410" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="1190" y1="240" x2="1120" y2="410" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="1190" y1="240" x2="1260" y2="410" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="700" y1="410" x2="700" y2="570" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="980" y1="410" x2="980" y2="570" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<line x1="1260" y1="410" x2="1260" y2="570" stroke="rgba(255,255,255,0.1)" stroke-width="1.2"/>
+<circle cx="700" cy="70" r="42" fill="rgba(247,129,102,0.15)" stroke="#f0883e" stroke-width="1.4"/>
+<text x="700" y="75" text-anchor="middle" font-size="14px" fill="#f0883e" font-weight="500" font-family="'JetBrains Mono', monospace">p0_e0_2</text>
+<circle cx="140" cy="240" r="30" fill="rgba(86,212,160,0.10)" stroke="rgba(86,212,160,0.45)" stroke-width="1.4"/>
+<text x="140" y="245" text-anchor="middle" font-size="12px" fill="#56d4a0" font-weight="500" font-family="'JetBrains Mono', monospace">p0_e0_3</text>
+<circle cx="350" cy="240" r="34" fill="rgba(179,146,240,0.12)" stroke="rgba(179,146,240,0.5)" stroke-width="1.4"/>
+<text x="350" y="245" text-anchor="middle" font-size="12px" fill="#b392f0" font-weight="500" font-family="'JetBrains Mono', monospace">p0_e1_2</text>
+<circle cx="630" cy="240" r="34" fill="rgba(179,146,240,0.12)" stroke="rgba(179,146,240,0.5)" stroke-width="1.4"/>
+<text x="630" y="245" text-anchor="middle" font-size="12px" fill="#b392f0" font-weight="500" font-family="'JetBrains Mono', monospace">p1_e0_2</text>
+<circle cx="910" cy="240" r="34" fill="rgba(179,146,240,0.12)" stroke="rgba(179,146,240,0.5)" stroke-width="1.4"/>
+<text x="910" y="245" text-anchor="middle" font-size="12px" fill="#b392f0" font-weight="500" font-family="'JetBrains Mono', monospace">p2_e0_2</text>
+<circle cx="1190" cy="240" r="34" fill="rgba(179,146,240,0.12)" stroke="rgba(179,146,240,0.5)" stroke-width="1.4"/>
+<text x="1190" y="245" text-anchor="middle" font-size="12px" fill="#b392f0" font-weight="500" font-family="'JetBrains Mono', monospace">p3_e0_2</text>
+<circle cx="350" cy="410" r="30" fill="rgba(86,212,160,0.10)" stroke="rgba(86,212,160,0.45)" stroke-width="1.4"/>
+<text x="350" y="415" text-anchor="middle" font-size="12px" fill="#56d4a0" font-weight="500" font-family="'JetBrains Mono', monospace">p0_e1_3</text>
+<circle cx="560" cy="410" r="30" fill="rgba(86,212,160,0.10)" stroke="rgba(86,212,160,0.45)" stroke-width="1.4"/>
+<text x="560" y="415" text-anchor="middle" font-size="12px" fill="#56d4a0" font-weight="500" font-family="'JetBrains Mono', monospace">p1_e0_3</text>
+<circle cx="700" cy="410" r="34" fill="rgba(179,146,240,0.12)" stroke="rgba(179,146,240,0.5)" stroke-width="1.4"/>
+<text x="700" y="415" text-anchor="middle" font-size="12px" fill="#b392f0" font-weight="500" font-family="'JetBrains Mono', monospace">p1_e1_2</text>
+<circle cx="840" cy="410" r="30" fill="rgba(86,212,160,0.10)" stroke="rgba(86,212,160,0.45)" stroke-width="1.4"/>
+<text x="840" y="415" text-anchor="middle" font-size="12px" fill="#56d4a0" font-weight="500" font-family="'JetBrains Mono', monospace">p2_e0_3</text>
+<circle cx="980" cy="410" r="34" fill="rgba(179,146,240,0.12)" stroke="rgba(179,146,240,0.5)" stroke-width="1.4"/>
+<text x="980" y="415" text-anchor="middle" font-size="12px" fill="#b392f0" font-weight="500" font-family="'JetBrains Mono', monospace">p2_e1_2</text>
+<circle cx="1120" cy="410" r="30" fill="rgba(86,212,160,0.10)" stroke="rgba(86,212,160,0.45)" stroke-width="1.4"/>
+<text x="1120" y="415" text-anchor="middle" font-size="12px" fill="#56d4a0" font-weight="500" font-family="'JetBrains Mono', monospace">p3_e0_3</text>
+<circle cx="1260" cy="410" r="34" fill="rgba(179,146,240,0.12)" stroke="rgba(179,146,240,0.5)" stroke-width="1.4"/>
+<text x="1260" y="415" text-anchor="middle" font-size="12px" fill="#b392f0" font-weight="500" font-family="'JetBrains Mono', monospace">p3_e1_2</text>
+<circle cx="700" cy="570" r="30" fill="rgba(86,212,160,0.10)" stroke="rgba(86,212,160,0.45)" stroke-width="1.4"/>
+<text x="700" y="575" text-anchor="middle" font-size="12px" fill="#56d4a0" font-weight="500" font-family="'JetBrains Mono', monospace">p1_e1_3</text>
+<circle cx="980" cy="570" r="30" fill="rgba(86,212,160,0.10)" stroke="rgba(86,212,160,0.45)" stroke-width="1.4"/>
+<text x="980" y="575" text-anchor="middle" font-size="12px" fill="#56d4a0" font-weight="500" font-family="'JetBrains Mono', monospace">p2_e1_3</text>
+<circle cx="1260" cy="570" r="30" fill="rgba(86,212,160,0.10)" stroke="rgba(86,212,160,0.45)" stroke-width="1.4"/>
+<text x="1260" y="575" text-anchor="middle" font-size="12px" fill="#56d4a0" font-weight="500" font-family="'JetBrains Mono', monospace">p3_e1_3</text>
+<text x="700" y="128" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">ROOT</text>
+<text x="140" y="286" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">LEAF</text>
+<text x="350" y="290" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">INTERNAL</text>
+<text x="630" y="290" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">INTERNAL</text>
+<text x="910" y="290" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">INTERNAL</text>
+<text x="1190" y="290" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">INTERNAL</text>
+<text x="350" y="456" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">LEAF</text>
+<text x="560" y="456" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">LEAF</text>
+<text x="700" y="460" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">INTERNAL</text>
+<text x="840" y="456" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">LEAF</text>
+<text x="980" y="460" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">INTERNAL</text>
+<text x="1120" y="456" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">LEAF</text>
+<text x="1260" y="460" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">INTERNAL</text>
+<text x="700" y="616" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">LEAF</text>
+<text x="980" y="616" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">LEAF</text>
+<text x="1260" y="616" text-anchor="middle" font-size="10px" fill="#484f58" font-family="'JetBrains Mono', monospace">LEAF</text>
+<text x="30" y="75" font-size="12px" fill="#484f58" font-weight="500" font-family="'DM Sans', sans-serif">Level 0</text>
+<text x="30" y="245" font-size="12px" fill="#484f58" font-weight="500" font-family="'DM Sans', sans-serif">Level 1</text>
+<text x="30" y="415" font-size="12px" fill="#484f58" font-weight="500" font-family="'DM Sans', sans-serif">Level 2</text>
+<text x="30" y="575" font-size="12px" fill="#484f58" font-weight="500" font-family="'DM Sans', sans-serif">Level 3</text>
+</svg>
+</body>
+</html>

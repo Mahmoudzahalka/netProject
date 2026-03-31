@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>k=4 Fat Tree — Tree All-Reduce v2 Rank Assignment</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #0e1117;
+    --surface: #161b22;
+    --border: rgba(255,255,255,0.06);
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --text-dim: #484f58;
+    --core: #b392f0;
+    --core-fill: rgba(179,146,240,0.12);
+    --core-stroke: rgba(179,146,240,0.5);
+    --agg: #56d4a0;
+    --agg-fill: rgba(86,212,160,0.10);
+    --agg-stroke: rgba(86,212,160,0.45);
+    --edge: #58a6ff;
+    --edge-fill: rgba(88,166,255,0.10);
+    --edge-stroke: rgba(88,166,255,0.45);
+    --host: #f78166;
+    --host-fill: rgba(247,129,102,0.12);
+    --host-stroke: rgba(247,129,102,0.5);
+    --link: rgba(255,255,255,0.07);
+    --font: 'DM Sans', system-ui, sans-serif;
+    --mono: 'JetBrains Mono', monospace;
+    --l0: #f0883e;
+    --l1: #f78166;
+    --l2: #8b949e;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 16px 48px;
+  }
+  h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 4px; color: #e6edf3; }
+  .subtitle { font-size: 13px; color: var(--text-muted); margin-bottom: 24px; }
+  .legend { display: flex; gap: 16px; margin-bottom: 20px; font-size: 12px; color: var(--text-muted); flex-wrap: wrap; justify-content: center; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+  .legend-line { width: 20px; height: 0; border-top: 2.5px solid; border-radius: 1px; }
+  .diagram-wrap { width: 100%; max-width: 920px; overflow-x: auto; }
+  svg { display: block; width: 100%; min-width: 800px; }
+  .pod-label { font-family: var(--font); font-size: 11px; fill: var(--text-dim); font-weight: 500; letter-spacing: 0.04em; }
+  .node-label { font-family: var(--mono); font-size: 9.5px; font-weight: 500; text-anchor: middle; dominant-baseline: central; }
+  .rank-num { font-family: var(--mono); font-size: 15px; font-weight: 600; text-anchor: middle; dominant-baseline: central; }
+  .host-sub { font-family: var(--mono); font-size: 8px; font-weight: 400; text-anchor: middle; dominant-baseline: central; fill: var(--text-muted); }
+  .bw-label { font-family: var(--mono); font-size: 9px; fill: var(--text-dim); text-anchor: middle; }
+  .level-tag { font-family: var(--mono); font-size: 8px; font-weight: 600; text-anchor: middle; dominant-baseline: central; }
+  .section-title { width: 100%; max-width: 920px; font-size: 14px; font-weight: 500; color: var(--text-muted); margin: 28px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .table-wrap { width: 100%; max-width: 920px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; font-size: 12px; font-family: var(--mono); background: var(--border); border-radius: 8px; overflow: hidden; }
+  .table-col { background: var(--surface); padding: 12px 14px; }
+  .table-col .col-header { font-weight: 600; color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .table-row { display: flex; justify-content: space-between; padding: 3px 0; color: var(--text); }
+  .table-row .rank { color: var(--host); font-weight: 500; min-width: 22px; }
+  .table-row .hname { color: var(--text-muted); font-size: 11px; }
+  .tree-info { width: 100%; max-width: 920px; margin-top: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; font-size: 12px; font-family: var(--mono); color: var(--text-muted); line-height: 1.8; }
+  .bw-info { width: 100%; max-width: 920px; margin-top: 16px; font-size: 11px; font-family: var(--mono); color: var(--text-dim); text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>k=4 Fat Tree — Tree All-Reduce v2 Ranks</h1>
+<p class="subtitle">16 hosts across 4 pods, hierarchical tree overlay on physical fat tree (depth 2, root fan-out 6)</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:var(--core)"></div>Core</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--agg)"></div>Aggregation</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--edge)"></div>Edge</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--host)"></div>Host</div>
+  <div class="legend-item"><div class="legend-line" style="border-color:#f0883e"></div>L0→L1 edge</div>
+  <div class="legend-item"><div class="legend-line" style="border-color:#58a6ff"></div>L1→L2 edge</div>
+  <div class="legend-item"><span style="font-family:var(--mono);font-size:11px;color:var(--l0)">L0</span> Root</div>
+  <div class="legend-item"><span style="font-family:var(--mono);font-size:11px;color:var(--l1)">L1</span> Depth 1</div>
+  <div class="legend-item"><span style="font-family:var(--mono);font-size:11px;color:var(--l2)">L2</span> Depth 2</div>
+</div>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 900 470">
+  <defs>
+    <marker id="tarrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M1 1L9 5L1 9" fill="none" stroke="#f0883e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="tarrow-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M1 1L9 5L1 9" fill="none" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Pod containers -->
+  <rect x="22" y="30" width="204" height="370" rx="8" fill="none" stroke="var(--border)" stroke-width="1" stroke-dasharray="4 3"/>
+  <rect x="236" y="30" width="204" height="370" rx="8" fill="none" stroke="var(--border)" stroke-width="1" stroke-dasharray="4 3"/>
+  <rect x="450" y="30" width="204" height="370" rx="8" fill="none" stroke="var(--border)" stroke-width="1" stroke-dasharray="4 3"/>
+  <rect x="664" y="30" width="204" height="370" rx="8" fill="none" stroke="var(--border)" stroke-width="1" stroke-dasharray="4 3"/>
+  <text class="pod-label" x="124" y="48" text-anchor="middle">POD 0</text>
+  <text class="pod-label" x="338" y="48" text-anchor="middle">POD 1</text>
+  <text class="pod-label" x="552" y="48" text-anchor="middle">POD 2</text>
+  <text class="pod-label" x="766" y="48" text-anchor="middle">POD 3</text>
+
+  <!-- CORE ROUTERS -->
+  <rect x="320" y="65" width="46" height="26" rx="5" fill="var(--core-fill)" stroke="var(--core-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="343" y="78" fill="var(--core)">c0</text>
+  <rect x="378" y="65" width="46" height="26" rx="5" fill="var(--core-fill)" stroke="var(--core-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="401" y="78" fill="var(--core)">c1</text>
+  <rect x="436" y="65" width="46" height="26" rx="5" fill="var(--core-fill)" stroke="var(--core-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="459" y="78" fill="var(--core)">c2</text>
+  <rect x="494" y="65" width="46" height="26" rx="5" fill="var(--core-fill)" stroke="var(--core-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="517" y="78" fill="var(--core)">c3</text>
+
+  <!-- AGG ROUTERS -->
+  <rect x="49" y="155" width="52" height="26" rx="5" fill="var(--agg-fill)" stroke="var(--agg-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="75" y="168" fill="var(--agg)">p0_a2</text>
+  <rect x="147" y="155" width="52" height="26" rx="5" fill="var(--agg-fill)" stroke="var(--agg-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="173" y="168" fill="var(--agg)">p0_a3</text>
+  <rect x="263" y="155" width="52" height="26" rx="5" fill="var(--agg-fill)" stroke="var(--agg-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="289" y="168" fill="var(--agg)">p1_a2</text>
+  <rect x="361" y="155" width="52" height="26" rx="5" fill="var(--agg-fill)" stroke="var(--agg-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="387" y="168" fill="var(--agg)">p1_a3</text>
+  <rect x="477" y="155" width="52" height="26" rx="5" fill="var(--agg-fill)" stroke="var(--agg-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="503" y="168" fill="var(--agg)">p2_a2</text>
+  <rect x="575" y="155" width="52" height="26" rx="5" fill="var(--agg-fill)" stroke="var(--agg-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="601" y="168" fill="var(--agg)">p2_a3</text>
+  <rect x="691" y="155" width="52" height="26" rx="5" fill="var(--agg-fill)" stroke="var(--agg-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="717" y="168" fill="var(--agg)">p3_a2</text>
+  <rect x="789" y="155" width="52" height="26" rx="5" fill="var(--agg-fill)" stroke="var(--agg-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="815" y="168" fill="var(--agg)">p3_a3</text>
+
+  <!-- EDGE ROUTERS -->
+  <rect x="49" y="245" width="52" height="26" rx="5" fill="var(--edge-fill)" stroke="var(--edge-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="75" y="258" fill="var(--edge)">p0_e0</text>
+  <rect x="147" y="245" width="52" height="26" rx="5" fill="var(--edge-fill)" stroke="var(--edge-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="173" y="258" fill="var(--edge)">p0_e1</text>
+  <rect x="263" y="245" width="52" height="26" rx="5" fill="var(--edge-fill)" stroke="var(--edge-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="289" y="258" fill="var(--edge)">p1_e0</text>
+  <rect x="361" y="245" width="52" height="26" rx="5" fill="var(--edge-fill)" stroke="var(--edge-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="387" y="258" fill="var(--edge)">p1_e1</text>
+  <rect x="477" y="245" width="52" height="26" rx="5" fill="var(--edge-fill)" stroke="var(--edge-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="503" y="258" fill="var(--edge)">p2_e0</text>
+  <rect x="575" y="245" width="52" height="26" rx="5" fill="var(--edge-fill)" stroke="var(--edge-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="601" y="258" fill="var(--edge)">p2_e1</text>
+  <rect x="691" y="245" width="52" height="26" rx="5" fill="var(--edge-fill)" stroke="var(--edge-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="717" y="258" fill="var(--edge)">p3_e0</text>
+  <rect x="789" y="245" width="52" height="26" rx="5" fill="var(--edge-fill)" stroke="var(--edge-stroke)" stroke-width="0.7"/>
+  <text class="node-label" x="815" y="258" fill="var(--edge)">p3_e1</text>
+
+  <!-- PHYSICAL LINKS: Core↔Agg -->
+  <line x1="75" y1="155" x2="343" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="75" y1="155" x2="401" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="173" y1="155" x2="459" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="173" y1="155" x2="517" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="289" y1="155" x2="343" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="289" y1="155" x2="401" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="387" y1="155" x2="459" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="387" y1="155" x2="517" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="503" y1="155" x2="343" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="503" y1="155" x2="401" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="601" y1="155" x2="459" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="601" y1="155" x2="517" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="717" y1="155" x2="343" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="717" y1="155" x2="401" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="815" y1="155" x2="459" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="815" y1="155" x2="517" y2="91" stroke="var(--link)" stroke-width="0.7"/>
+
+  <!-- PHYSICAL LINKS: Edge↔Agg -->
+  <line x1="75" y1="245" x2="75" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="75" y1="245" x2="173" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="173" y1="245" x2="75" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="173" y1="245" x2="173" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="289" y1="245" x2="289" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="289" y1="245" x2="387" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="387" y1="245" x2="289" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="387" y1="245" x2="387" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="503" y1="245" x2="503" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="503" y1="245" x2="601" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="601" y1="245" x2="503" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="601" y1="245" x2="601" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="717" y1="245" x2="717" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="717" y1="245" x2="815" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="815" y1="245" x2="717" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="815" y1="245" x2="815" y2="181" stroke="var(--link)" stroke-width="0.7"/>
+
+  <!-- PHYSICAL LINKS: Edge↔Hosts -->
+  <line x1="63" y1="271" x2="50" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="87" y1="271" x2="100" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="161" y1="271" x2="148" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="185" y1="271" x2="198" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="277" y1="271" x2="264" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="301" y1="271" x2="314" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="375" y1="271" x2="362" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="399" y1="271" x2="412" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="491" y1="271" x2="478" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="515" y1="271" x2="528" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="589" y1="271" x2="576" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="613" y1="271" x2="626" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="705" y1="271" x2="692" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="729" y1="271" x2="742" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="803" y1="271" x2="790" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+  <line x1="827" y1="271" x2="840" y2="330" stroke="var(--link)" stroke-width="0.7"/>
+
+  <!-- HOSTS: rank, name, level -->
+  <!-- Pod 0: rank0=L0(root), rank4=L1(leaf), rank8=L1(leaf), rank12=L1(leaf) -->
+  <rect x="32" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--l0)" stroke-width="1.4"/>
+  <text class="rank-num" x="50" y="348" fill="var(--l0)">0</text>
+  <text class="host-sub" x="50" y="364">e0_2</text>
+  <text class="level-tag" x="50" y="380" fill="var(--l0)">L0</text>
+
+  <rect x="82" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="100" y="348" fill="var(--l1)">4</text>
+  <text class="host-sub" x="100" y="364">e0_3</text>
+  <text class="level-tag" x="100" y="380" fill="var(--l1)">L1</text>
+
+  <rect x="130" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="148" y="348" fill="var(--l1)">8</text>
+  <text class="host-sub" x="148" y="364">e1_2</text>
+  <text class="level-tag" x="148" y="380" fill="var(--l1)">L1</text>
+
+  <rect x="180" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="198" y="348" fill="var(--l1)">12</text>
+  <text class="host-sub" x="198" y="364">e1_3</text>
+  <text class="level-tag" x="198" y="380" fill="var(--l1)">L1</text>
+
+  <!-- Pod 1: rank1=L1(internal,3ch), rank5=L2(leaf), rank9=L2(leaf), rank13=L2(leaf) -->
+  <rect x="246" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--l1)" stroke-width="1"/>
+  <text class="rank-num" x="264" y="348" fill="var(--l1)">1</text>
+  <text class="host-sub" x="264" y="364">e0_2</text>
+  <text class="level-tag" x="264" y="380" fill="var(--l1)">L1</text>
+
+  <rect x="296" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="314" y="348" fill="var(--l2)">5</text>
+  <text class="host-sub" x="314" y="364">e0_3</text>
+  <text class="level-tag" x="314" y="380" fill="var(--l2)">L2</text>
+
+  <rect x="344" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="362" y="348" fill="var(--l2)">9</text>
+  <text class="host-sub" x="362" y="364">e1_2</text>
+  <text class="level-tag" x="362" y="380" fill="var(--l2)">L2</text>
+
+  <rect x="394" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="412" y="348" fill="var(--l2)">13</text>
+  <text class="host-sub" x="412" y="364">e1_3</text>
+  <text class="level-tag" x="412" y="380" fill="var(--l2)">L2</text>
+
+  <!-- Pod 2: rank2=L1(internal,3ch), rank6=L2(leaf), rank10=L2(leaf), rank14=L2(leaf) -->
+  <rect x="460" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--l1)" stroke-width="1"/>
+  <text class="rank-num" x="478" y="348" fill="var(--l1)">2</text>
+  <text class="host-sub" x="478" y="364">e0_2</text>
+  <text class="level-tag" x="478" y="380" fill="var(--l1)">L1</text>
+
+  <rect x="510" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="528" y="348" fill="var(--l2)">6</text>
+  <text class="host-sub" x="528" y="364">e0_3</text>
+  <text class="level-tag" x="528" y="380" fill="var(--l2)">L2</text>
+
+  <rect x="558" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="576" y="348" fill="var(--l2)">10</text>
+  <text class="host-sub" x="576" y="364">e1_2</text>
+  <text class="level-tag" x="576" y="380" fill="var(--l2)">L2</text>
+
+  <rect x="608" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="626" y="348" fill="var(--l2)">14</text>
+  <text class="host-sub" x="626" y="364">e1_3</text>
+  <text class="level-tag" x="626" y="380" fill="var(--l2)">L2</text>
+
+  <!-- Pod 3: rank3=L1(internal,3ch), rank7=L2(leaf), rank11=L2(leaf), rank15=L2(leaf) -->
+  <rect x="674" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--l1)" stroke-width="1"/>
+  <text class="rank-num" x="692" y="348" fill="var(--l1)">3</text>
+  <text class="host-sub" x="692" y="364">e0_2</text>
+  <text class="level-tag" x="692" y="380" fill="var(--l1)">L1</text>
+
+  <rect x="724" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="742" y="348" fill="var(--l2)">7</text>
+  <text class="host-sub" x="742" y="364">e0_3</text>
+  <text class="level-tag" x="742" y="380" fill="var(--l2)">L2</text>
+
+  <rect x="772" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="790" y="348" fill="var(--l2)">11</text>
+  <text class="host-sub" x="790" y="364">e1_2</text>
+  <text class="level-tag" x="790" y="380" fill="var(--l2)">L2</text>
+
+  <rect x="822" y="330" width="36" height="56" rx="5" fill="var(--host-fill)" stroke="var(--host-stroke)" stroke-width="0.7"/>
+  <text class="rank-num" x="840" y="348" fill="var(--l2)">15</text>
+  <text class="host-sub" x="840" y="364">e1_3</text>
+  <text class="level-tag" x="840" y="380" fill="var(--l2)">L2</text>
+
+  <!-- LOGICAL TREE EDGES -->
+  <!-- Root 0 (cx=50) → leaf 4 (cx=100) : same edge, horizontal -->
+  <line x1="68" y1="358" x2="82" y2="358" stroke="#f0883e" stroke-width="2.5" marker-end="url(#tarrow)"/>
+
+  <!-- Root 0 (cx=50) → leaf 8 (cx=148) : intra-pod -->
+  <path d="M50 386 L50 400 L148 400 L148 386" fill="none" stroke="#f0883e" stroke-width="2.5" marker-end="url(#tarrow)"/>
+
+  <!-- Root 0 (cx=50) → leaf 12 (cx=198) : intra-pod -->
+  <path d="M50 386 L50 410 L198 410 L198 386" fill="none" stroke="#f0883e" stroke-width="2.5" marker-end="url(#tarrow)"/>
+
+  <!-- Root 0 (cx=50) → internal 1 (cx=264) : cross-pod -->
+  <path d="M50 386 L50 422 L264 422 L264 386" fill="none" stroke="#f0883e" stroke-width="2.5" marker-end="url(#tarrow)"/>
+
+  <!-- Root 0 (cx=50) → internal 2 (cx=478) : cross-pod -->
+  <path d="M50 386 L50 436 L478 436 L478 386" fill="none" stroke="#f0883e" stroke-width="2.5" marker-end="url(#tarrow)"/>
+
+  <!-- Root 0 (cx=50) → internal 3 (cx=692) : cross-pod -->
+  <path d="M50 386 L50 450 L692 450 L692 386" fill="none" stroke="#f0883e" stroke-width="2.5" marker-end="url(#tarrow)"/>
+
+  <!-- Internal 1 (cx=264) → leaf 5 (cx=314) : same edge -->
+  <line x1="282" y1="358" x2="296" y2="358" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Internal 1 (cx=264) → leaf 9 (cx=362) : intra-pod -->
+  <path d="M264 386 L264 406 L362 406 L362 386" fill="none" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Internal 1 (cx=264) → leaf 13 (cx=412) : intra-pod -->
+  <path d="M264 386 L264 416 L412 416 L412 386" fill="none" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Internal 2 (cx=478) → leaf 6 (cx=528) : same edge -->
+  <line x1="496" y1="358" x2="510" y2="358" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Internal 2 (cx=478) → leaf 10 (cx=576) : intra-pod -->
+  <path d="M478 386 L478 406 L576 406 L576 386" fill="none" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Internal 2 (cx=478) → leaf 14 (cx=626) : intra-pod -->
+  <path d="M478 386 L478 416 L626 416 L626 386" fill="none" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Internal 3 (cx=692) → leaf 7 (cx=742) : same edge -->
+  <line x1="710" y1="358" x2="724" y2="358" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Internal 3 (cx=692) → leaf 11 (cx=790) : intra-pod -->
+  <path d="M692 386 L692 406 L790 406 L790 386" fill="none" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Internal 3 (cx=692) → leaf 15 (cx=840) : intra-pod -->
+  <path d="M692 386 L692 416 L840 416 L840 386" fill="none" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#tarrow-b)"/>
+
+  <!-- Layer labels -->
+  <text class="bw-label" x="888" y="80" text-anchor="end">Core</text>
+  <text class="bw-label" x="888" y="170" text-anchor="end">Agg</text>
+  <text class="bw-label" x="888" y="260" text-anchor="end">Edge</text>
+  <text class="bw-label" x="888" y="358" text-anchor="end">Hosts</text>
+  <text class="bw-label" x="16" y="115" text-anchor="start" transform="rotate(-90 16 115)">1000 Mb/s</text>
+  <text class="bw-label" x="16" y="207" text-anchor="start" transform="rotate(-90 16 207)">500 Mb/s</text>
+  <text class="bw-label" x="16" y="303" text-anchor="start" transform="rotate(-90 16 303)">250 Mb/s</text>
+
+</svg>
+</div>
+
+<div class="section-title">Rank mapping</div>
+
+<div class="table-wrap">
+  <div class="table-col">
+    <div class="col-header">Ranks 0–3</div>
+    <div class="table-row"><span class="rank">0</span><span class="hname">h_p0_e0_2</span></div>
+    <div class="table-row"><span class="rank">1</span><span class="hname">h_p1_e0_2</span></div>
+    <div class="table-row"><span class="rank">2</span><span class="hname">h_p2_e0_2</span></div>
+    <div class="table-row"><span class="rank">3</span><span class="hname">h_p3_e0_2</span></div>
+  </div>
+  <div class="table-col">
+    <div class="col-header">Ranks 4–7</div>
+    <div class="table-row"><span class="rank">4</span><span class="hname">h_p0_e0_3</span></div>
+    <div class="table-row"><span class="rank">5</span><span class="hname">h_p1_e0_3</span></div>
+    <div class="table-row"><span class="rank">6</span><span class="hname">h_p2_e0_3</span></div>
+    <div class="table-row"><span class="rank">7</span><span class="hname">h_p3_e0_3</span></div>
+  </div>
+  <div class="table-col">
+    <div class="col-header">Ranks 8–11</div>
+    <div class="table-row"><span class="rank">8</span><span class="hname">h_p0_e1_2</span></div>
+    <div class="table-row"><span class="rank">9</span><span class="hname">h_p1_e1_2</span></div>
+    <div class="table-row"><span class="rank">10</span><span class="hname">h_p2_e1_2</span></div>
+    <div class="table-row"><span class="rank">11</span><span class="hname">h_p3_e1_2</span></div>
+  </div>
+  <div class="table-col">
+    <div class="col-header">Ranks 12–15</div>
+    <div class="table-row"><span class="rank">12</span><span class="hname">h_p0_e1_3</span></div>
+    <div class="table-row"><span class="rank">13</span><span class="hname">h_p1_e1_3</span></div>
+    <div class="table-row"><span class="rank">14</span><span class="hname">h_p2_e1_3</span></div>
+    <div class="table-row"><span class="rank">15</span><span class="hname">h_p3_e1_3</span></div>
+  </div>
+</div>
+
+<div class="section-title">Logical tree hierarchy (levels)</div>
+
+<div class="tree-info">
+  <div><span style="color:var(--l0)">L0</span> rank 0 (h_p0_e0_2) — root, 6 children</div>
+  <div>&nbsp;&nbsp;├── <span style="color:var(--l1)">L1</span> rank 4 (h_p0_e0_3) — leaf</div>
+  <div>&nbsp;&nbsp;├── <span style="color:var(--l1)">L1</span> rank 8 (h_p0_e1_2) — leaf</div>
+  <div>&nbsp;&nbsp;├── <span style="color:var(--l1)">L1</span> rank 12 (h_p0_e1_3) — leaf</div>
+  <div>&nbsp;&nbsp;├── <span style="color:var(--l1)">L1</span> rank 1 (h_p1_e0_2) — 3 children</div>
+  <div>&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── <span style="color:var(--l2)">L2</span> rank 5 (h_p1_e0_3) — leaf</div>
+  <div>&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── <span style="color:var(--l2)">L2</span> rank 9 (h_p1_e1_2) — leaf</div>
+  <div>&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;└── <span style="color:var(--l2)">L2</span> rank 13 (h_p1_e1_3) — leaf</div>
+  <div>&nbsp;&nbsp;├── <span style="color:var(--l1)">L1</span> rank 2 (h_p2_e0_2) — 3 children</div>
+  <div>&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── <span style="color:var(--l2)">L2</span> rank 6 (h_p2_e0_3) — leaf</div>
+  <div>&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;├── <span style="color:var(--l2)">L2</span> rank 10 (h_p2_e1_2) — leaf</div>
+  <div>&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;└── <span style="color:var(--l2)">L2</span> rank 14 (h_p2_e1_3) — leaf</div>
+  <div>&nbsp;&nbsp;└── <span style="color:var(--l1)">L1</span> rank 3 (h_p3_e0_2) — 3 children</div>
+  <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span style="color:var(--l2)">L2</span> rank 7 (h_p3_e0_3) — leaf</div>
+  <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── <span style="color:var(--l2)">L2</span> rank 11 (h_p3_e1_2) — leaf</div>
+  <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── <span style="color:var(--l2)">L2</span> rank 15 (h_p3_e1_3) — leaf</div>
+</div>
+
+<div class="bw-info">
+  Link bandwidths: host ↔ edge 250 Mb/s &nbsp;|&nbsp; edge ↔ agg 500 Mb/s &nbsp;|&nbsp; agg ↔ core 1000 Mb/s
+</div>
+
+</body>
+</html>
