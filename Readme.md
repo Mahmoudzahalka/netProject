@@ -20,5 +20,9 @@ in order to run the simulation :
     
     using the command:
     docker build -t network-multitool-python:latest .
+
+
+  - To Run the simulation with all the gradients run python3 <selected_sweep_script>.py
+    - you can alter what gradients the script runs in the designated field in the script
   
   
