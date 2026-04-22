@@ -1,0 +1,7 @@
+Ring all-reduce metrics (k=8, 128 hosts):
+  ranks_with_data=128/128
+  total_latency_s=1.683058
+  max_tail_s=1.178794
+  gradient_mib=4.000
+  total_throughput_mib_s=2.377
+

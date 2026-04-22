@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-ring_simulation_mininet_k8.py
+tree_simulation_mininet_k8.py
 
 - Builds a k=8 L3 Fat-Tree using plain Mininet with LinuxRouter nodes.
 - Static ECMP routes (no OSPF/FRR needed).
-- 128 hosts running TCP-based ring all-reduce.
-- Much lighter than Containernet: all nodes are Linux network namespaces.
+- 128 hosts running TCP-based hierarchical tree all-reduce.
+- Tree structure mirrors the physical fat-tree: pod -> edge -> host.
+- Topology: 16 core + 32 agg + 32 edge routers + 128 hosts = 208 nodes.
 """
 
 import os
@@ -20,14 +21,15 @@ from mininet.link import TCLink
 from mininet.log import info, setLogLevel
 
 # ---------------------------------------------------------------------------
-# Host-side ring all-reduce script, written once to /tmp
+# Host-side hierarchical tree all-reduce script
 # ---------------------------------------------------------------------------
 
-RING_NODE_SCRIPT = r"""#!/usr/bin/env python3
+TREE_NODE_SCRIPT = r"""#!/usr/bin/env python3
 import argparse
 import socket
 import time
 from array import array
+
 
 def recv_all(sock, nbytes):
     data = bytearray()
@@ -38,81 +40,105 @@ def recv_all(sock, nbytes):
         data.extend(chunk)
     return data
 
-def establish_connections(rank, world_size, listen_port, right_ip, right_port, log):
 
-    # Server for left neighbor
+def parse_children(children_str):
+    if not children_str:
+        return []
+    out = []
+    for token in children_str.split(","):
+        token = token.strip()
+        if token:
+            rank_str, ip, port_str = token.split(":")
+            out.append((int(rank_str), ip, int(port_str)))
+    return out
+
+
+def establish_tree_connections(rank, listen_port, parent_ip, parent_port, children, log):
+    expected_children = len(children)
+    child_rank_set = {child_rank for child_rank, _, _ in children}
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("", listen_port))
-    server.listen(1)
+    server.listen(max(1, expected_children))
 
-    # Client to right neighbor, with retry to avoid timing issues
-    while True:
-        try:
-            sock_right = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock_right.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock_right.connect((right_ip, right_port))
-            break
-        except Exception as e:
-            log(f"[rank {rank}] connect to right failed ({e}), retrying...")
-            time.sleep(0.1)
+    parent_sock = None
+    if parent_ip:
+        while True:
+            try:
+                parent_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                parent_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                parent_sock.connect((parent_ip, parent_port))
+                parent_sock.sendall(rank.to_bytes(4, byteorder="big", signed=False))
+                _ = recv_all(parent_sock, 1)
+                break
+            except Exception as e:
+                log(f"[rank {rank}] connect to parent failed ({e}), retrying...")
+                time.sleep(0.1)
 
-    # Accept connection from left neighbor
-    conn_left, addr_left = server.accept()
-    conn_left.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    child_socks = []
+    while len(child_socks) < expected_children:
+        conn, _ = server.accept()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        child_rank = int.from_bytes(recv_all(conn, 4), byteorder="big", signed=False)
+        if child_rank not in child_rank_set:
+            conn.close()
+            raise RuntimeError(f"Unexpected child rank {child_rank} for rank {rank}")
+        conn.sendall(b"H")
+        child_socks.append((child_rank, conn))
 
-    # One-byte handshake to be sure both directions are live
-    sock_right.sendall(b"H")
-    _ = recv_all(conn_left, 1)
-
+    child_socks.sort(key=lambda x: x[0])
     server.close()
-    return conn_left, sock_right
+    return parent_sock, [sock for _, sock in child_socks]
 
-def ring_allreduce(rank, world_size, conn_left, conn_right, grad_elems, log):
 
-    elems_per_chunk = grad_elems // world_size
-    assert grad_elems % world_size == 0
+def recv_full_grad(sock, grad_elems):
+    in_bytes = recv_all(sock, grad_elems * 4)
+    grad = array("f")
+    grad.frombytes(in_bytes)
+    return grad
 
+
+def send_full_grad(sock, grad):
+    sock.sendall(grad.tobytes())
+
+
+def tree_barrier(parent_sock, child_socks):
+    # Phase 1: gather — leaves send 'R' up, parents wait for all children then send up
+    for child_sock in child_socks:
+        recv_all(child_sock, 1)
+    if parent_sock is not None:
+        parent_sock.sendall(b"R")
+    # Phase 2: broadcast — root sends 'G' down, children forward down
+    if parent_sock is not None:
+        recv_all(parent_sock, 1)
+    for child_sock in child_socks:
+        child_sock.sendall(b"G")
+
+
+def tree_allreduce(rank, parent_sock, child_socks, grad_elems, log):
     grad = array("f", [float(rank)] * grad_elems)
-    chunk_bytes = elems_per_chunk * 4
 
-    def send_chunk(chunk_index):
-        start = chunk_index * elems_per_chunk
-        out_chunk = grad[start : start + elems_per_chunk]
-        conn_right.sendall(out_chunk.tobytes())
+    for child_sock in child_socks:
+        child_grad = recv_full_grad(child_sock, grad_elems)
+        grad = child_grad
 
-    def recv_chunk(chunk_index, do_reduce):
-        start = chunk_index * elems_per_chunk
-        in_bytes = recv_all(conn_left, chunk_bytes)
-        in_chunk = array("f")
-        in_chunk.frombytes(in_bytes)
+    if parent_sock is not None:
+        send_full_grad(parent_sock, grad)
+        grad = recv_full_grad(parent_sock, grad_elems)
 
-        if do_reduce:
-            grad[start : start + elems_per_chunk] = in_chunk
-        else:
-            grad[start : start + elems_per_chunk] = in_chunk
+    for child_sock in child_socks:
+        send_full_grad(child_sock, grad)
 
-    # Phase 1: scatter-reduce
-    for step in range(world_size - 1):
-        send_index = (rank - step) % world_size
-        recv_index = (rank - step - 1) % world_size
-        send_chunk(send_index)
-        recv_chunk(recv_index, do_reduce=True)
-
-    # Phase 2: all-gather
-    for step in range(world_size - 1):
-        send_index = (rank - step) % world_size
-        recv_index = (rank - step - 1) % world_size
-        send_chunk(send_index)
-        recv_chunk(recv_index, do_reduce=False)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--rank", type=int, required=True)
     parser.add_argument("--world-size", type=int, required=True)
     parser.add_argument("--listen-port", type=int, required=True)
-    parser.add_argument("--right-ip", type=str, required=True)
-    parser.add_argument("--right-port", type=int, required=True)
+    parser.add_argument("--parent-ip", type=str, default="")
+    parser.add_argument("--parent-port", type=int, default=0)
+    parser.add_argument("--children", type=str, default="")
     parser.add_argument("--grad-elems", type=int, default=1048576)
     parser.add_argument("--log-file", type=str, default=None)
     args = parser.parse_args()
@@ -125,27 +151,37 @@ def main():
             with open(args.log_file, "a") as f:
                 f.write(line + "\n")
 
-    conn_left, conn_right = establish_connections(
-        args.rank, args.world_size,
-        args.listen_port, args.right_ip, args.right_port,
-        log
+    children = parse_children(args.children)
+    parent_sock, child_socks = establish_tree_connections(
+        args.rank,
+        args.listen_port,
+        args.parent_ip,
+        args.parent_port,
+        children,
+        log,
     )
 
+    # Barrier: wait until all ranks have finished connection setup before starting
+    tree_barrier(parent_sock, child_socks)
+
     t0 = time.time()
-    ring_allreduce(args.rank, args.world_size, conn_left, conn_right, args.grad_elems, log)
+    tree_allreduce(args.rank, parent_sock, child_socks, args.grad_elems, log)
     t1 = time.time()
 
     log(f"[rank {args.rank}] TOTAL_TIME_SEC={t1 - t0:.6f}")
 
-    conn_left.close()
-    conn_right.close()
+    if parent_sock is not None:
+        parent_sock.close()
+    for child_sock in child_socks:
+        child_sock.close()
+
 
 if __name__ == "__main__":
     main()
 """
 
-RING_SCRIPT_PATH = "/tmp/ring_allreduce/ring_node.py"
-RING_LOG_DIR = "/tmp/ring_allreduce"
+TREE_SCRIPT_PATH = "/tmp/tree_allreduce/tree_node.py"
+TREE_LOG_DIR = "/tmp/tree_allreduce"
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +212,6 @@ class P2PAllocator:
     def next31(self):
         n = self.n
         self.n += 1
-        # 128 /31 pairs per third-octet (256 addresses / 2)
         A = n // 128
         B = n % 128
         ip1 = f"172.16.{A}.{2 * B}/31"
@@ -184,12 +219,7 @@ class P2PAllocator:
         return ip1, ip2
 
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-
 def strip_mask(ip_with_mask):
-    """'172.16.0.1/31' -> '172.16.0.1'"""
     return ip_with_mask.split("/")[0]
 
 
@@ -198,11 +228,6 @@ def strip_mask(ip_with_mask):
 # ---------------------------------------------------------------------------
 
 def enforce_all_ips(edge_agg_links, agg_core_links, host_links):
-    """
-    Flush and re-apply IPs on every interface to avoid Mininet auto-assign conflicts.
-    Also clears any stale routes that Mininet may have auto-configured.
-    """
-
     info("*** Enforcing IPs on all P2P interfaces\n")
     for n1, i1, ip1, n2, i2, ip2 in edge_agg_links + agg_core_links:
         n1.cmd(f"ip addr flush dev {i1} && ip addr add {ip1} dev {i1}")
@@ -213,10 +238,8 @@ def enforce_all_ips(edge_agg_links, agg_core_links, host_links):
         edge.cmd(f"ip addr flush dev {edge_intf} && ip addr add {edge_ip} dev {edge_intf}")
         host.cmd(f"ip addr flush dev {host_intf} && ip addr add {host_ip} dev {host_intf}")
         gw = strip_mask(edge_ip)
-        # Use replace to handle any pre-existing default from Mininet auto-config
         host.cmd(f"ip route replace default via {gw}")
 
-    # Clear any stale default routes on routers left by Mininet
     info("*** Clearing stale routes on all routers\n")
     seen = set()
     for n1, _, _, n2, _, _ in edge_agg_links + agg_core_links:
@@ -227,7 +250,7 @@ def enforce_all_ips(edge_agg_links, agg_core_links, host_links):
 
 
 # ---------------------------------------------------------------------------
-# Build k=8 Fat-Tree
+# Build Fat-Tree
 # ---------------------------------------------------------------------------
 
 def build_fattree(net, k, p2p_alloc):
@@ -235,31 +258,27 @@ def build_fattree(net, k, p2p_alloc):
     agg_per_pod = {}
     edge_per_pod = {}
     all_routers = []
-    edge_agg_links = []   # (edge, intf, ip, agg, intf, ip)
-    agg_core_links = []   # (agg, intf, ip, core, intf, ip)
-    host_links = []       # (edge, intf, ip, host, intf, ip)
+    edge_agg_links = []
+    agg_core_links = []
+    host_links = []
 
     half = k // 2
 
-    # --- Core routers ---
-    info("*** Creating core routers\n")
+    info(f"*** Creating {half ** 2} core routers\n")
     for i in range(half ** 2):
         r = net.addHost(f"c{i}", cls=LinuxRouter)
         core.append(r)
         all_routers.append(r)
 
-    # --- Pods ---
     for p in range(k):
         agg = []
         edge = []
 
-        # Aggregation routers
         for a in range(half, k):
             r = net.addHost(f"p{p}_a{a}", cls=LinuxRouter)
             agg.append(r)
             all_routers.append(r)
 
-        # Edge routers + hosts
         for e in range(half):
             r = net.addHost(f"p{p}_e{e}", cls=LinuxRouter)
             edge.append(r)
@@ -290,7 +309,6 @@ def build_fattree(net, k, p2p_alloc):
         agg_per_pod[p] = agg
         edge_per_pod[p] = edge
 
-    # --- Edge <-> Agg links ---
     info("*** Creating edge-agg links\n")
     for p in range(k):
         for er in edge_per_pod[p]:
@@ -304,7 +322,6 @@ def build_fattree(net, k, p2p_alloc):
                     ar, link.intf2.name, ip2,
                 ))
 
-    # --- Agg <-> Core links ---
     info("*** Creating agg-core links\n")
     for p in range(k):
         for idx, ar in enumerate(agg_per_pod[p]):
@@ -323,21 +340,13 @@ def build_fattree(net, k, p2p_alloc):
 
 
 # ---------------------------------------------------------------------------
-# Install static ECMP routes (replaces OSPF)
+# Install static ECMP routes
 # ---------------------------------------------------------------------------
 
 def install_static_routes(k, core, agg_per_pod, edge_per_pod,
                           edge_agg_links, agg_core_links):
-    """
-    Fat-tree routing with static ECMP:
-      - Edge  -> default ECMP via all agg routers in pod
-      - Agg   -> per-edge /24 routes + default ECMP via core routers
-      - Core  -> per-pod /16 route via the connected agg in that pod
-    """
-
     info("*** Installing static routes on edge routers\n")
 
-    # Edge: default ECMP via all connected agg routers
     edge_to_agg_nexthops = defaultdict(list)
     for edge, _, _, agg, _, agg_ip in edge_agg_links:
         edge_to_agg_nexthops[edge.name].append(strip_mask(agg_ip))
@@ -355,8 +364,7 @@ def install_static_routes(k, core, agg_per_pod, edge_per_pod,
 
     info("*** Installing static routes on agg routers\n")
 
-    # Agg: in-pod /24 routes via edge routers + default ECMP via core routers
-    agg_to_edge_routes = defaultdict(list)  # agg_name -> [(edge_ip, pod, edge_idx)]
+    agg_to_edge_routes = defaultdict(list)
     for edge, _, edge_ip, agg, _, _ in edge_agg_links:
         parts = edge.name.split("_")
         pod = int(parts[0][1:])
@@ -373,12 +381,10 @@ def install_static_routes(k, core, agg_per_pod, edge_per_pod,
             agg_nodes[ar.name] = ar
 
     for name, ar in agg_nodes.items():
-        # In-pod: specific route to each edge's host subnet
         cmds = []
         for edge_ip, pod, eidx in agg_to_edge_routes[name]:
             cmds.append(f"ip route replace 10.{pod}.{eidx}.0/24 via {edge_ip}")
 
-        # Cross-pod: default ECMP via core routers
         nhops = agg_to_core_nexthops[name]
         nexthop_str = " ".join(f"nexthop via {ip}" for ip in nhops)
         cmds.append(f"ip route del default 2>/dev/null || true")
@@ -388,8 +394,7 @@ def install_static_routes(k, core, agg_per_pod, edge_per_pod,
 
     info("*** Installing static routes on core routers\n")
 
-    # Core: per-pod /16 route via connected agg router
-    core_to_pod_routes = defaultdict(list)  # core_name -> [(agg_ip, pod)]
+    core_to_pod_routes = defaultdict(list)
     for agg, _, agg_ip, core_r, _, _ in agg_core_links:
         parts = agg.name.split("_")
         pod = int(parts[0][1:])
@@ -405,24 +410,15 @@ def install_static_routes(k, core, agg_per_pod, edge_per_pod,
 
 
 # ---------------------------------------------------------------------------
-# Verify L3 routing (proof for presentation that this is NOT L2 bridging)
+# Verify L3 routing
 # ---------------------------------------------------------------------------
 
 def verify_l3_routing(k, core, agg_per_pod, edge_per_pod, host_links):
-    """
-    Verify and print evidence that the network uses L3 routing with ECMP:
-      1. ip_forward enabled on all router types
-      2. Sample routing tables showing ECMP nexthops
-      3. Cross-pod ping to confirm connectivity
-      4. Traceroute showing L3 hops through edge->agg->core->agg->edge
-    """
-
     info("\n")
     info("=" * 70 + "\n")
     info("  L3 ROUTING VERIFICATION\n")
     info("=" * 70 + "\n\n")
 
-    # 1. Confirm IP forwarding is on
     sample_edge = edge_per_pod[0][0]
     sample_agg = agg_per_pod[0][0]
     sample_core = core[0]
@@ -434,7 +430,6 @@ def verify_l3_routing(k, core, agg_per_pod, edge_per_pod, host_links):
         info(f"    {r.name:12s}  ip_forward={fwd}  fib_multipath_hash_policy={ecmp}\n")
     info("\n")
 
-    # 2. Show routing tables proving ECMP
     info(f"*** [2/4] Routing table: EDGE router {sample_edge.name}\n")
     info(f"    (expect: default ECMP via {k // 2} agg routers)\n")
     info(sample_edge.cmd("ip route show") + "\n")
@@ -447,7 +442,6 @@ def verify_l3_routing(k, core, agg_per_pod, edge_per_pod, host_links):
     info(f"    (expect: {k} per-pod /16 routes, one per pod)\n")
     info(sample_core.cmd("ip route show") + "\n")
 
-    # 3. Cross-pod ping
     host_info = {}
     for _, _, _, host, _, host_ip in host_links:
         host_info[host.name] = (host, strip_mask(host_ip))
@@ -461,8 +455,6 @@ def verify_l3_routing(k, core, agg_per_pod, edge_per_pod, host_links):
     result = src_host.cmd(f"ping -c 3 -W 2 {dst_ip}")
     info(result + "\n")
 
-    # 4. Traceroute showing L3 hops
-    # (requires traceroute installed: sudo apt install traceroute)
     info(f"*** [4/4] Traceroute: {src_name} -> {dst_name}\n")
     info(f"    (expect 5 L3 hops: edge->agg->core->agg->edge)\n")
     result = src_host.cmd(f"traceroute -n -m 10 -w 2 {dst_ip}")
@@ -474,15 +466,55 @@ def verify_l3_routing(k, core, agg_per_pod, edge_per_pod, host_links):
 
 
 # ---------------------------------------------------------------------------
-# Ring all-reduce: setup and launch
+# Tree topology — pod-aware hierarchical all-reduce
 # ---------------------------------------------------------------------------
 
-def build_ring_order(k):
+def build_tree_structure(k):
     """
-    Build ring order interleaving pods — adjacent ring neighbors are in
-    different pods to exercise cross-pod fat-tree paths.
-    Pattern: for each (edge, host_index), cycle through all pods.
+    Build a hierarchical tree that mirrors the fat-tree physical topology:
+      - Root: h_p0_e0_2 (pod 0, edge 0, host 2)
+      - Root's children:
+          * same-edge siblings (leaves): h_p0_e0_{3..half+1}
+          * other-edge roots in pod 0: h_p0_e{1..half-1}_2
+          * other-pod roots: h_p{1..k-1}_e0_2
+      - Pod root's children: same-edge siblings + other-edge roots in same pod
+      - Edge root's children: same-edge siblings (leaves)
     """
+    half = k // 2
+    children_by_name = {}
+
+    def leaves_of(p, e):
+        return [f"h_p{p}_e{e}_{h}" for h in range(3, half + 2)]
+
+    # Root: h_p0_e0_2
+    root_children = []
+    root_children.extend(leaves_of(0, 0))
+
+    # Other edges in pod 0 -> edge roots
+    for e in range(1, half):
+        edge_root = f"h_p0_e{e}_2"
+        root_children.append(edge_root)
+        children_by_name[edge_root] = leaves_of(0, e)
+
+    # Other pods -> pod roots
+    for p in range(1, k):
+        pod_root = f"h_p{p}_e0_2"
+        root_children.append(pod_root)
+
+        pod_root_children = []
+        pod_root_children.extend(leaves_of(p, 0))
+        for e in range(1, half):
+            edge_root = f"h_p{p}_e{e}_2"
+            pod_root_children.append(edge_root)
+            children_by_name[edge_root] = leaves_of(p, e)
+        children_by_name[pod_root] = pod_root_children
+
+    children_by_name["h_p0_e0_2"] = root_children
+    return children_by_name
+
+
+def build_host_order(k):
+    """All host names in a stable deterministic order (for rank assignment)."""
     half = k // 2
     ordered = []
     for e in range(half):
@@ -492,81 +524,97 @@ def build_ring_order(k):
     return ordered
 
 
-def setup_and_start_ring(host_links, k):
-    """
-    Write ring_node.py to shared filesystem, build ring order,
-    and launch one ring process per host.
-    """
+# ---------------------------------------------------------------------------
+# Tree all-reduce setup and launch
+# ---------------------------------------------------------------------------
 
-    # Collect unique hosts and their IPs
+def setup_and_start_tree(host_links, k):
     host_info = {}
     for _, _, _, host, _, host_ip in host_links:
         ip = strip_mask(host_ip)
         host_info[host.name] = (host, ip)
 
-    ordered_names = build_ring_order(k)
-    ring = [host_info[name] for name in ordered_names]
-    world_size = len(ring)
-    info(f"*** Ring hosts (world_size={world_size})\n")
+    ordered_names = build_host_order(k)
+    tree_hosts = [host_info[name] for name in ordered_names]
+    world_size = len(tree_hosts)
+    info(f"*** Tree hosts (world_size={world_size})\n")
 
-    # Gradient size (same elems_per_chunk as v1)
-    elems_per_chunk = 1600
+    elems_per_chunk = 1600  # 1600 * 128 * 4 = 819,200 bytes (~800 KiB per host)
     grad_elems = world_size * elems_per_chunk
 
     base_port = 5000
+    ranks = {name: rank for rank, name in enumerate(ordered_names)}
 
-    # Write ring_node.py once to shared filesystem
-    info("*** Writing ring_node.py to shared filesystem\n")
-    os.makedirs(RING_LOG_DIR, exist_ok=True)
-    with open(RING_SCRIPT_PATH, "w") as f:
-        f.write(RING_NODE_SCRIPT)
-    os.chmod(RING_SCRIPT_PATH, 0o755)
+    children_by_name = build_tree_structure(k)
+    parent_by_name = {}
+    for parent_name, child_names in children_by_name.items():
+        for child_name in child_names:
+            parent_by_name[child_name] = parent_name
+
+    # Sanity check: every non-root host must have a parent
+    missing = [n for n in ordered_names if n != "h_p0_e0_2" and n not in parent_by_name]
+    if missing:
+        info(f"*** WARNING: {len(missing)} hosts missing a parent: {missing[:5]}...\n")
+
+    # Write tree_node.py once to shared filesystem
+    info("*** Writing tree_node.py to shared filesystem\n")
+    os.makedirs(TREE_LOG_DIR, exist_ok=True)
+    with open(TREE_SCRIPT_PATH, "w") as f:
+        f.write(TREE_NODE_SCRIPT)
+    os.chmod(TREE_SCRIPT_PATH, 0o755)
 
     # Clear old log files
     for rank in range(world_size):
-        log_file = os.path.join(RING_LOG_DIR, f"ring_rank{rank}.log")
+        log_file = os.path.join(TREE_LOG_DIR, f"tree_rank{rank}.log")
         if os.path.exists(log_file):
             os.remove(log_file)
 
-    # Start one ring process per host
-    info("*** Starting ring all-reduce on all hosts\n")
-    for rank, (host, ip) in enumerate(ring):
-        _, right_ip = ring[(rank + 1) % world_size]
-
+    info(f"*** Starting hierarchical tree all-reduce on all {world_size} hosts\n")
+    for rank, (host, ip) in enumerate(tree_hosts):
+        host_name = ordered_names[rank]
         listen_port = base_port + rank
-        right_port = base_port + ((rank + 1) % world_size)
-        log_file = os.path.join(RING_LOG_DIR, f"ring_rank{rank}.log")
+        log_file = os.path.join(TREE_LOG_DIR, f"tree_rank{rank}.log")
+
+        parent_name = parent_by_name.get(host_name)
+        if parent_name is None:
+            parent_ip = ""
+            parent_port = 0
+        else:
+            _, parent_ip = host_info[parent_name]
+            parent_port = base_port + ranks[parent_name]
+
+        child_specs = []
+        for child_name in children_by_name.get(host_name, []):
+            child_rank = ranks[child_name]
+            _, child_ip = host_info[child_name]
+            child_port = base_port + child_rank
+            child_specs.append(f"{child_rank}:{child_ip}:{child_port}")
+        children_arg = ",".join(child_specs)
 
         cmd = (
-            f"python3 {RING_SCRIPT_PATH} "
+            f"python3 {TREE_SCRIPT_PATH} "
             f"--rank {rank} --world-size {world_size} "
             f"--listen-port {listen_port} "
-            f"--right-ip {right_ip} --right-port {right_port} "
+            f"--parent-ip '{parent_ip}' --parent-port {parent_port} "
+            f"--children '{children_arg}' "
             f"--grad-elems {grad_elems} "
             f"--log-file {log_file} "
             "&"
         )
         host.cmd(cmd)
 
-    info("*** Ring all-reduce processes launched (background in each host)\n")
+    info("*** Tree all-reduce processes launched (background in each host)\n")
 
 
 # ---------------------------------------------------------------------------
 # Metrics collection
 # ---------------------------------------------------------------------------
 
-def collect_ring_metrics(host_links, k):
-    """
-    Parse per-rank ring logs and compute:
-      - total latency  = max rank latency (slowest rank)
-      - total throughput = logical gradient bytes / total latency
-      - max tail = max_latency - min_latency
-    """
-
-    info("*** Sleeping 60s for all-reduce completion (128 hosts)\n")
+def collect_tree_metrics(host_links, k):
+    info("*** Sleeping 60s for tree all-reduce completion\n")
     time.sleep(60)
 
-    ordered_names = build_ring_order(k)
+    ordered_names = build_host_order(k)
     world_size = len(ordered_names)
 
     elems_per_chunk = 1600
@@ -576,7 +624,7 @@ def collect_ring_metrics(host_links, k):
     latencies = []
 
     for rank in range(world_size):
-        log_file = os.path.join(RING_LOG_DIR, f"ring_rank{rank}.log")
+        log_file = os.path.join(TREE_LOG_DIR, f"tree_rank{rank}.log")
         try:
             with open(log_file, "r") as f:
                 content = f.read()
@@ -589,11 +637,10 @@ def collect_ring_metrics(host_links, k):
             info(f"*** WARNING: no TOTAL_TIME_SEC in rank {rank} log\n")
             continue
 
-        latency = float(matches[-1])
-        latencies.append(latency)
+        latencies.append(float(matches[-1]))
 
     if not latencies:
-        info("*** Ring metrics: no latency data collected from logs\n")
+        info("*** Tree metrics: no latency data collected from logs\n")
         return
 
     fastest = min(latencies)
@@ -605,7 +652,7 @@ def collect_ring_metrics(host_links, k):
     total_throughput_mib_per_sec = total_throughput_bytes_per_sec / (1024.0 * 1024.0)
     gradient_mib = gradient_bytes / (1024.0 * 1024.0)
 
-    info("*** Ring all-reduce metrics:\n")
+    info("*** Hierarchical tree all-reduce metrics:\n")
     info(f"    ranks with data:            {len(latencies)}/{world_size}\n")
     info(f"    total latency (slowest):    {total_latency:.6f} s\n")
     info(f"    max tail (slowest-fastest): {max_tail:.6f} s\n")
@@ -613,8 +660,8 @@ def collect_ring_metrics(host_links, k):
     info(f"    total throughput:           {total_throughput_mib_per_sec:.3f} MiB/s\n")
 
     try:
-        with open("ring_metrics.log", "a") as f:
-            f.write("Ring all-reduce metrics (k=8, 128 hosts):\n")
+        with open("tree_metrics.log", "a") as f:
+            f.write("Hierarchical tree all-reduce metrics (k=8, 128 hosts):\n")
             f.write(f"  ranks_with_data={len(latencies)}/{world_size}\n")
             f.write(f"  total_latency_s={total_latency:.6f}\n")
             f.write(f"  max_tail_s={max_tail:.6f}\n")
@@ -622,7 +669,7 @@ def collect_ring_metrics(host_links, k):
             f.write(f"  total_throughput_mib_s={total_throughput_mib_per_sec:.3f}\n")
             f.write("\n")
     except Exception as e:
-        info(f"*** WARNING: failed to write ring_metrics.log: {e}\n")
+        info(f"*** WARNING: failed to write tree_metrics.log: {e}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -633,7 +680,6 @@ _ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def read_if_counters(node, ifname):
-    """Read tx_bytes and rx_bytes for a given interface inside a Mininet node."""
     base = f"/sys/class/net/{ifname}/statistics"
     out = node.cmd(
         f"cat {base}/tx_bytes {base}/rx_bytes 2>&1 || echo '0 0'"
@@ -650,7 +696,6 @@ def read_if_counters(node, ifname):
 
 
 def snapshot_all_link_counters(all_p2p_links, host_links):
-    """Take a snapshot of tx/rx counters for all interfaces."""
     snap = {}
 
     for n1, if1, _, n2, if2, _ in all_p2p_links:
@@ -665,8 +710,7 @@ def snapshot_all_link_counters(all_p2p_links, host_links):
 
 
 def report_raw_link_load(before_snap, all_p2p_links, host_links):
-    """Compare current counters to before_snap and log byte deltas per interface."""
-    info("*** Raw link load (tx_bytes, rx_bytes per interface during ring) ***\n")
+    info("*** Raw link load (tx_bytes, rx_bytes per interface during tree all-reduce) ***\n")
 
     seen = set()
 
@@ -682,10 +726,10 @@ def report_raw_link_load(before_snap, all_p2p_links, host_links):
         drx = rx1 - rx0
 
         try:
-            with open("link_load.log", "a") as f:
+            with open("tree_link_load.log", "a") as f:
                 f.write(f"  {role} {node.name}:{ifname}  Δtx={dtx} B  Δrx={drx} B\n")
         except Exception as e:
-            info(f"*** WARNING: failed to write link_load.log: {e}\n")
+            info(f"*** WARNING: failed to write tree_link_load.log: {e}\n")
 
     for n1, if1, _, n2, if2, _ in all_p2p_links:
         report_for(n1, if1, "R-R")
@@ -713,36 +757,27 @@ def run():
 
     net.start()
 
-    # Enforce correct IPs on all interfaces
     enforce_all_ips(edge_agg_links, agg_core_links, host_links)
 
-    # Install static ECMP routes (replaces OSPF — no convergence wait needed)
     install_static_routes(k, core, agg_per_pod, edge_per_pod,
                           edge_agg_links, agg_core_links)
 
-    # Small sleep to let interfaces settle
     info("*** Sleeping 3s for interfaces to settle\n")
     time.sleep(3)
 
-    # Verify L3 routing is working (prints evidence for presentation)
     verify_l3_routing(k, core, agg_per_pod, edge_per_pod, host_links)
 
-    # Take baseline link counters before starting the ring
     all_p2p_links = edge_agg_links + agg_core_links
     link_counters_before = snapshot_all_link_counters(all_p2p_links, host_links)
 
-    # Start ring all-reduce
-    setup_and_start_ring(host_links, k)
+    setup_and_start_tree(host_links, k)
 
-    # Drop into CLI while ring traffic is running
-    info("*** Starting CLI (ring all-reduce is running in background)\n")
+    info("*** Starting CLI (hierarchical tree all-reduce is running in background)\n")
     CLI(net)
 
-    # After exiting CLI, collect metrics
-    info("*** Collecting ring all-reduce metrics\n")
-    collect_ring_metrics(host_links, k)
+    info("*** Collecting hierarchical tree all-reduce metrics\n")
+    collect_tree_metrics(host_links, k)
 
-    # Report raw link load
     info("*** Collecting raw link load\n")
     report_raw_link_load(link_counters_before, all_p2p_links, host_links)
 

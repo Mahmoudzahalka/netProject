@@ -433,23 +433,27 @@ def setup_and_start_ring(host_links):
     # Stable ring order: lexicographic by host name
     #ordered_names = sorted(host_info.keys())
     ordered_names = [
-    "h_p0_e0_2",  # 1
-    "h_p1_e0_2",  # 2
-    "h_p2_e0_2",  # 3
-    "h_p3_e0_2",  # 4
-    "h_p0_e0_3",  # 5
-    "h_p1_e0_3",  # 6
-    "h_p2_e0_3",  # 7
-    "h_p3_e0_3",  # 8
-    "h_p0_e1_2",  # 9
-    "h_p1_e1_2",  # 10
-    "h_p2_e1_2",  # 11
-    "h_p3_e1_2",  # 12
-    "h_p0_e1_3",  # 13
-    "h_p1_e1_3",  # 14
-    "h_p2_e1_3",  # 15
-    "h_p3_e1_3",  # 16
-    ]   
+    # --- Pod 0 ---
+    "h_p0_e0_2",
+    "h_p0_e0_3",  # intra-edge
+    "h_p0_e1_2",  # intra-pod, cross-edge
+    "h_p0_e1_3",  # intra-edge
+    # --- Pod 1 ---
+    "h_p1_e0_2",  # cross-pod
+    "h_p1_e0_3",  # intra-edge
+    "h_p1_e1_2",  # intra-pod, cross-edge
+    "h_p1_e1_3",  # intra-edge
+    # --- Pod 2 ---
+    "h_p2_e0_2",  # cross-pod
+    "h_p2_e0_3",  # intra-edge
+    "h_p2_e1_2",  # intra-pod, cross-edge
+    "h_p2_e1_3",  # intra-edge
+    # --- Pod 3 ---
+    "h_p3_e0_2",  # cross-pod
+    "h_p3_e0_3",  # intra-edge
+    "h_p3_e1_2",  # intra-pod, cross-edge
+    "h_p3_e1_3",  # intra-edge (wraps to h_p0_e0_2, cross-pod)
+    ]
     ring = [host_info[name] for name in ordered_names]
     world_size = len(ring)
     info(f"*** Ring hosts (world_size={world_size}): "
@@ -521,22 +525,26 @@ def collect_ring_metrics(host_links):
 
     # Use the SAME logical ring order as in setup_and_start_ring (duplicated on purpose)
     ordered_names = [
-        "h_p0_e0_2",  # 1
-        "h_p1_e0_2",  # 2
-        "h_p2_e0_2",  # 3
-        "h_p3_e0_2",  # 4
-        "h_p0_e0_3",  # 5
-        "h_p1_e0_3",  # 6
-        "h_p2_e0_3",  # 7
-        "h_p3_e0_3",  # 8
-        "h_p0_e1_2",  # 9
-        "h_p1_e1_2",  # 10
-        "h_p2_e1_2",  # 11
-        "h_p3_e1_2",  # 12
-        "h_p0_e1_3",  # 13
-        "h_p1_e1_3",  # 14
-        "h_p2_e1_3",  # 15
-        "h_p3_e1_3",  # 16
+        # --- Pod 0 ---
+        "h_p0_e0_2",
+        "h_p0_e0_3",  # intra-edge
+        "h_p0_e1_2",  # intra-pod, cross-edge
+        "h_p0_e1_3",  # intra-edge
+        # --- Pod 1 ---
+        "h_p1_e0_2",  # cross-pod
+        "h_p1_e0_3",  # intra-edge
+        "h_p1_e1_2",  # intra-pod, cross-edge
+        "h_p1_e1_3",  # intra-edge
+        # --- Pod 2 ---
+        "h_p2_e0_2",  # cross-pod
+        "h_p2_e0_3",  # intra-edge
+        "h_p2_e1_2",  # intra-pod, cross-edge
+        "h_p2_e1_3",  # intra-edge
+        # --- Pod 3 ---
+        "h_p3_e0_2",  # cross-pod
+        "h_p3_e0_3",  # intra-edge
+        "h_p3_e1_2",  # intra-pod, cross-edge
+        "h_p3_e1_3",  # intra-edge (wraps to h_p0_e0_2, cross-pod)
     ]
     ring = [host_info[name] for name in ordered_names]
     world_size = len(ring)
